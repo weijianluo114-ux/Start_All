@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QDir, QRectF, QPointF, pyqtSignal
 from PyQt5.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
-    QLinearGradient, QRadialGradient, QPainterPath
+    QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker
 )
 
 try:
@@ -504,31 +504,38 @@ class MacroRecorderDialog(QDialog):
 
 class TaijiLaunchButton(QWidget):
     """
-    太极式双半圆控件：左半绿「启动」、右半红「关闭」，整圆带 3D 凸起质感。
+    太极阴阳式启动 / 关闭控件：左（绿）＝一键启动，右（红）＝关闭全部。
 
-    设计要点：
-      · 一个整圆按垂直直径分成两个半圆，每个半圆独立响应点击，互不干扰；
-      · 3D 效果不依赖图片：对角线性渐变（左上亮 → 右下暗）+ 顶部镜面高光
-        + 底部内阴影 + 外圈上亮下暗描边 + 柔和落影，四层叠加形成"凸起"错觉；
-      · 禁用态用中性灰，禁用左半（启动中）时不会连带灰掉右半边。
+    造型按太极图的几何构造绘制：
+      · 整圆半径 R，被 S 形曲线分成两条"鱼"——
+        上半个 S = 小圆（圆心在正上方 R/2、半径 R/2）的右半圆，
+        下半个 S = 小圆（圆心在正下方 R/2、半径 R/2）的左半圆；
+      · 两条鱼之间留 `gap` 像素的真实缝隙（用 QPainterPathStroker 从鱼形里减掉），
+        点在缝隙上不响应；
+      · 鱼眼用对比色：左鱼（绿）嵌红眼、右鱼（红）嵌绿眼；
+      · 凹凸感靠"边缘浮雕"实现——沿鱼形路径用对角线渐变画笔描边（左上白 → 右下黑），
+        再叠顶部镜面高光与底部内阴影，观感像两枚压铸出来的实体按键；
+      · 文字竖排：每个字单独居中绘制、自上而下排列，不做旋转。
     """
 
     run_requested = pyqtSignal()
     close_requested = pyqtSignal()
 
-    # 每个半圆三段色：高光 / 本色 / 暗部
-    RUN_COLORS = ('#7CE79B', '#25B45F', '#0F6E3C')
-    CLOSE_COLORS = ('#FB8B7B', '#D93E33', '#76170F')
-    IDLE_COLORS = ('#EDEDED', '#CFCFCF', '#A6A6A6')
+    # 每个半区三段色：高光 / 本色 / 暗部（偏沉稳的玉石绿与朱砂红，避免糖果色）
+    RUN_COLORS = ('#75C39B', '#2B815C', '#114835')
+    CLOSE_COLORS = ('#D98C7A', '#AB4132', '#5D1A12')
+    IDLE_COLORS = ('#E9E9E9', '#C8C8C8', '#9E9E9E')
 
-    def __init__(self, diameter=132, parent=None):
+    def __init__(self, diameter=160, parent=None):
         super().__init__(parent)
         self._d = int(diameter)
-        self._margin = 14                      # 留给落影的空间
+        self._margin = 16                     # 留给落影
+        self._gap = 5                         # 两条鱼之间的缝隙
+        self._cache = None
         self.setFixedSize(self._d + self._margin * 2, self._d + self._margin * 2)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip('左半圆：一键启动当前预设　|　右半圆：关闭列表内的程序与文件夹窗口')
+        self.setToolTip('左（绿）：一键启动当前预设　|　右（红）：关闭列表内的程序与文件夹窗口')
         self._hover = None
         self._pressed = None
         self._run_enabled = True
@@ -549,177 +556,65 @@ class TaijiLaunchButton(QWidget):
         self._close_enabled = bool(enabled)
         self.update()
 
-    # ------------------------- 绘制 -------------------------
+    # ------------------------- 几何 -------------------------
 
-    def _rect(self):
-        return QRectF(self._margin, self._margin, self._d, self._d)
+    def _geometry(self):
+        """
+        返回 (圆外框, 左鱼路径, 右鱼路径, 两只鱼眼中心, 鱼眼半径)。
 
-    def _half_path(self, rect, side):
-        """半圆路径：从正上方沿圆弧走到正下方，再沿垂直直径闭合。"""
-        path = QPainterPath()
-        top = QPointF(rect.center().x(), rect.top())
-        path.moveTo(top)
-        # Qt 角度以 3 点钟为 0°、逆时针为正
-        path.arcTo(rect, 90, 180 if side == 'run' else -180)
-        path.lineTo(top)
-        path.closeSubpath()
-        return path
+        S 形分割按太极图构造：上段小圆的右半圆 + 下段小圆的左半圆。
+        路径缓存起来，绘制与命中判定共用同一份几何，避免两者算出不同的边界。
+        """
+        if self._cache is not None:
+            return self._cache
 
-    def _colors(self, side):
-        enabled = self._run_enabled if side == 'run' else self._close_enabled
-        if not enabled:
-            base = self.IDLE_COLORS
-        else:
-            base = self.RUN_COLORS if side == 'run' else self.CLOSE_COLORS
-        light, main, dark = (QColor(c) for c in base)
-        if enabled and self._pressed == side:
-            light, main, dark = (c.darker(112) for c in (light, main, dark))
-        elif enabled and self._hover == side:
-            light, main, dark = (c.lighter(108) for c in (light, main, dark))
-        return enabled, light, main, dark
+        d = float(self._d)
+        r = d / 2.0
+        cx = cy = self._margin + r
+        big = QRectF(self._margin, self._margin, d, d)
+        small_top = QRectF(cx - r / 2.0, cy - r, r, r)      # 圆心 (cx, cy - r/2)
+        small_bot = QRectF(cx - r / 2.0, cy, r, r)          # 圆心 (cx, cy + r/2)
 
-    def _paint_shadow(self, p, rect):
-        """落影：多层低透明度椭圆叠加，避免依赖模糊滤镜。"""
-        p.save()
-        p.setPen(Qt.NoPen)
-        for offset, spread, alpha in ((2, 0, 38), (5, 1, 26), (8, 2, 16), (12, 4, 9)):
-            r = rect.adjusted(-spread, -spread + offset, spread, spread + offset)
-            p.setBrush(QColor(0, 0, 0, alpha))
-            p.drawEllipse(r)
-        p.restore()
+        # 左鱼：外圈左半 → 下段 S（小圆左半，自下而上）→ 上段 S（小圆右半，自下而上）
+        left = QPainterPath()
+        left.moveTo(cx, cy - r)
+        left.arcTo(big, 90, 180)
+        left.arcTo(small_bot, 270, -180)
+        left.arcTo(small_top, 270, 180)
+        left.closeSubpath()
 
-    def _paint_half(self, p, rect, side):
-        enabled, light, main, dark = self._colors(side)
-        path = self._half_path(rect, side)
+        # 右鱼：外圈右半 → 下段 S（小圆右半）→ 上段 S（小圆左半）
+        right = QPainterPath()
+        right.moveTo(cx, cy - r)
+        right.arcTo(big, 90, -180)
+        right.arcTo(small_bot, 270, -180)
+        right.arcTo(small_top, 270, 180)
+        right.closeSubpath()
 
-        p.save()
-        p.setClipPath(path)
+        # 用 S 曲线的粗描边把两条鱼各切掉一半缝隙，得到真实间隙
+        divider = QPainterPath()
+        divider.moveTo(cx, cy - r)
+        divider.arcTo(small_top, 90, -180)
+        divider.arcTo(small_bot, 90, 180)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(self._gap)
+        stroker.setCapStyle(Qt.FlatCap)
+        gap = stroker.createStroke(divider)
+        left = left.subtracted(gap)
+        right = right.subtracted(gap)
 
-        # 1) 主渐变：左上亮 → 右下暗，模拟从左上方打光
-        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        grad.setColorAt(0.0, light)
-        grad.setColorAt(0.55, main)
-        grad.setColorAt(1.0, dark)
-        p.fillPath(path, QBrush(grad))
-
-        # 2) 顶部镜面高光：椭圆径向渐变，落在每个半圆的靠外上方
-        offset = -rect.width() * 0.16 if side == 'run' else rect.width() * 0.16
-        spec = QRadialGradient(
-            QPointF(rect.center().x() + offset, rect.top() + rect.height() * 0.24),
-            rect.width() * 0.55)
-        spec.setColorAt(0.0, QColor(255, 255, 255, 130 if enabled else 70))
-        spec.setColorAt(0.6, QColor(255, 255, 255, 40 if enabled else 22))
-        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.fillPath(path, QBrush(spec))
-
-        # 3) 底部内阴影：让圆有厚度，不是一张贴纸
-        shade = QLinearGradient(
-            QPointF(rect.left(), rect.bottom() - rect.height() * 0.42),
-            QPointF(rect.left(), rect.bottom()))
-        shade.setColorAt(0.0, QColor(0, 0, 0, 0))
-        shade.setColorAt(1.0, QColor(0, 0, 0, 70 if enabled else 34))
-        p.fillPath(path, QBrush(shade))
-
-        # 4) 半圆轮廓
-        p.setClipping(False)
-        pen = QPen(dark if enabled else QColor('#9E9E9E'))
-        pen.setWidthF(1.3)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(path)
-
-        # 5) 交互态：只描弧线，避免在中缝上画出多余亮线
-        if enabled and (self._hover == side or self._pressed == side):
-            inset = rect.adjusted(1.4, 1.4, -1.4, -1.4)
-            if self._pressed == side:
-                rim, width = QColor(0, 0, 0, 80), 2.0
-            else:
-                rim, width = QColor(255, 255, 255, 115), 2.2
-            pen = QPen(rim)
-            pen.setWidthF(width)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            p.drawArc(inset, 90 * 16, (180 if side == 'run' else -180) * 16)
-        p.restore()
-
-    def _paint_bevel(self, p, rect):
-        """整圆外圈的上亮下暗描边，强化球面感。"""
-        p.save()
-        p.setBrush(Qt.NoBrush)
-        inner = rect.adjusted(0.9, 0.9, -0.9, -0.9)
-        pen = QPen(QColor(255, 255, 255, 110))
-        pen.setWidthF(1.9)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.drawArc(inner, 30 * 16, 120 * 16)
-        pen = QPen(QColor(0, 0, 0, 70))
-        pen.setWidthF(1.7)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.drawArc(inner, 210 * 16, 120 * 16)
-        p.restore()
-
-    def _paint_seam(self, p, rect):
-        """中缝：一条暗线 + 一条偏右的亮线，做出"被分开"的折痕。"""
-        p.save()
-        cx = rect.center().x()
-        pen = QPen(QColor(0, 0, 0, 55))
-        pen.setWidthF(1.4)
-        p.setPen(pen)
-        p.drawLine(QPointF(cx, rect.top() + 1.5), QPointF(cx, rect.bottom() - 1.5))
-        pen = QPen(QColor(255, 255, 255, 85))
-        pen.setWidthF(1.0)
-        p.setPen(pen)
-        p.drawLine(QPointF(cx + 1.2, rect.top() + 3), QPointF(cx + 1.2, rect.bottom() - 3))
-        p.restore()
-
-    def _paint_text(self, p, rect):
-        font = QFont(self.font())
-        font.setBold(True)
-        font.setWeight(QFont.Black)
-        font.setPixelSize(max(14, int(self._d * 0.175)))
-        p.save()
-        p.setFont(font)
-        for side, text, rotation in (('run', '启动', 90), ('close', '关闭', 90)):
-            enabled = self._run_enabled if side == 'run' else self._close_enabled
-            p.save()
-            shift = -rect.width() * 0.255 if side == 'run' else rect.width() * 0.255
-            p.translate(rect.center().x() + shift, rect.center().y())
-            p.rotate(rotation)
-            fm = p.fontMetrics()
-            text_w = fm.boundingRect(text).width()
-            text_h = fm.height()
-            box = QRectF(-text_w / 2 - 3, -text_h / 2 - 2, text_w + 6, text_h + 4)
-            # 文字投影，避免压在亮部看不清
-            p.setPen(QColor(0, 0, 0, 75 if enabled else 45))
-            p.drawText(box.translated(0, 1.5), Qt.AlignCenter, text)
-            p.setPen(QColor(255, 255, 255, 252 if enabled else 160))
-            p.drawText(box, Qt.AlignCenter, text)
-            p.restore()
-        p.restore()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.TextAntialiasing, True)
-        rect = self._rect()
-        self._paint_shadow(p, rect)
-        self._paint_half(p, rect, 'run')
-        self._paint_half(p, rect, 'close')
-        self._paint_bevel(p, rect)
-        self._paint_seam(p, rect)
-        self._paint_text(p, rect)
-        p.end()
-
-    # ------------------------- 交互 -------------------------
+        eyes = (QPointF(cx, cy - r / 2.0), QPointF(cx, cy + r / 2.0))
+        self._cache = (big, left, right, eyes, r * 0.165, r, cx, cy)
+        return self._cache
 
     def _side_at(self, pos):
-        """命中判定：圆内才响应，按垂直直径划分左右。"""
-        cx = cy = self._margin + self._d / 2.0
-        dx, dy = pos.x() - cx, pos.y() - cy
-        if dx * dx + dy * dy > (self._d / 2.0) ** 2:
-            return None
-        return 'run' if dx < 0 else 'close'
+        _big, left, right, _eyes, _er, _r, _cx, _cy = self._geometry()
+        pt = QPointF(pos)
+        if left.contains(pt):
+            return 'run'
+        if right.contains(pt):
+            return 'close'
+        return None                       # 圆外或缝隙
 
     def _side_enabled(self, side):
         if side == 'run':
@@ -727,6 +622,194 @@ class TaijiLaunchButton(QWidget):
         if side == 'close':
             return self._close_enabled
         return False
+
+    # ------------------------- 绘制 -------------------------
+
+    def _palette_for(self, side):
+        enabled = self._run_enabled if side == 'run' else self._close_enabled
+        base = self.IDLE_COLORS if not enabled else (
+            self.RUN_COLORS if side == 'run' else self.CLOSE_COLORS)
+        light, main, dark = (QColor(c) for c in base)
+        if enabled and self._pressed == side:
+            light, main, dark = (c.darker(116) for c in (light, main, dark))
+        elif enabled and self._hover == side:
+            light, main, dark = (c.lighter(110) for c in (light, main, dark))
+        return enabled, light, main, dark
+
+    def _paint_shadow(self, p, big):
+        p.save()
+        p.setPen(Qt.NoPen)
+        for offset, spread, alpha in ((2, 0, 40), (5, 1, 28), (9, 2, 17), (13, 4, 9)):
+            r = big.adjusted(-spread, -spread + offset, spread, spread + offset)
+            p.setBrush(QColor(0, 0, 0, alpha))
+            p.drawEllipse(r)
+        p.restore()
+
+    def _paint_fish(self, p, path, side):
+        _big, _l, _r, _eyes, _er, radius, cx, cy = self._geometry()
+        enabled, light, main, dark = self._palette_for(side)
+        rect = self._rect()
+
+        p.save()
+        p.setClipPath(path)
+
+        # 1) 主体：对角渐变（左上亮 → 右下暗），统一光源
+        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        grad.setColorAt(0.0, light)
+        grad.setColorAt(0.5, main)
+        grad.setColorAt(1.0, dark)
+        p.fillPath(path, QBrush(grad))
+
+        # 2) 顶部镜面高光
+        spec = QRadialGradient(QPointF(cx - radius * 0.30, cy - radius * 0.45), radius * 0.85)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 105 if enabled else 60))
+        spec.setColorAt(0.55, QColor(255, 255, 255, 34 if enabled else 18))
+        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillPath(path, QBrush(spec))
+
+        # 3) 底部内阴影：制造厚度
+        shade = QLinearGradient(QPointF(0, cy + radius * 0.15), QPointF(0, rect.bottom()))
+        shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+        shade.setColorAt(1.0, QColor(0, 0, 0, 78 if enabled else 34))
+        p.fillPath(path, QBrush(shade))
+
+        # 4) 边缘浮雕：沿轮廓用对角渐变描边，左上见白、右下见黑
+        p.setClipping(False)
+        bevel = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        bevel.setColorAt(0.0, QColor(255, 255, 255, 190 if enabled else 120))
+        bevel.setColorAt(0.42, QColor(255, 255, 255, 0))
+        bevel.setColorAt(0.58, QColor(0, 0, 0, 0))
+        bevel.setColorAt(1.0, QColor(0, 0, 0, 120 if enabled else 60))
+        pen = QPen(QBrush(bevel), 2.6)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+        # 5) 悬停 / 按下：再补一圈细边，强化"按得动"的手感
+        if enabled and (self._hover == side or self._pressed == side):
+            rim = QColor(255, 255, 255, 120) if self._pressed != side else QColor(0, 0, 0, 80)
+            pen = QPen(rim)
+            pen.setWidthF(1.2)
+            p.setPen(pen)
+            p.drawPath(path)
+        p.restore()
+
+    def _paint_eye(self, p, center, eye_r, colors, enabled):
+        light, _main, dark = (QColor(c) for c in colors)
+        p.save()
+        # 阴影
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 70 if enabled else 30))
+        p.drawEllipse(center + QPointF(0, 1.2), eye_r, eye_r)
+        # 主体
+        g = QLinearGradient(center + QPointF(-eye_r, -eye_r), center + QPointF(eye_r, eye_r))
+        g.setColorAt(0.0, light.lighter(112))
+        g.setColorAt(1.0, dark)
+        p.setBrush(QBrush(g))
+        p.drawEllipse(center, eye_r, eye_r)
+        # 浮雕边
+        bevel = QLinearGradient(center + QPointF(-eye_r, -eye_r), center + QPointF(eye_r, eye_r))
+        bevel.setColorAt(0.0, QColor(255, 255, 255, 150))
+        bevel.setColorAt(0.5, QColor(255, 255, 255, 0))
+        bevel.setColorAt(1.0, QColor(0, 0, 0, 110))
+        pen = QPen(QBrush(bevel), 1.4)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(center, eye_r, eye_r)
+        p.restore()
+
+    def _paint_text(self, p):
+        _big, _l, _r, _eyes, _er, radius, cx, cy = self._geometry()
+        font = QFont(self.font())
+        font.setWeight(QFont.DemiBold)
+        font.setPixelSize(max(13, int(radius * 0.36)))
+        p.save()
+        p.setFont(font)
+        fm = p.fontMetrics()
+        line_h = int(fm.height() * 1.02)
+
+        # 文字放在各自的"鱼身"里：左鱼靠左上、右鱼靠右下，
+        # 这样两字竖排不会压到中间的 S 形缝隙（鱼身在这个位置最宽）。
+        for side, text in (('run', '启动'), ('close', '关闭')):
+            enabled = self._run_enabled if side == 'run' else self._close_enabled
+            if side == 'run':
+                x, base_y = cx - radius * 0.42, cy - radius * 0.26
+            else:
+                x, base_y = cx + radius * 0.42, cy + radius * 0.26
+            for i, ch in enumerate(text):
+                offset = (i - (len(text) - 1) / 2.0) * line_h
+                box = QRectF(x - radius * 0.30, base_y + offset - line_h / 2.0,
+                             radius * 0.60, line_h)
+                # 浮雕字：先画右下暗影，再画亮面；禁用时改用深灰字，避免白字糊在浅灰上
+                if enabled:
+                    p.setPen(QColor(0, 0, 0, 95))
+                    p.drawText(box.translated(0.6, 1.1), Qt.AlignCenter, ch)
+                    p.setPen(QColor(255, 255, 255, 245))
+                else:
+                    p.setPen(QColor(255, 255, 255, 130))
+                    p.drawText(box.translated(0.6, 1.1), Qt.AlignCenter, ch)
+                    p.setPen(QColor(110, 110, 110, 215))
+                p.drawText(box, Qt.AlignCenter, ch)
+        p.restore()
+
+    def _rect(self):
+        return QRectF(self._margin, self._margin, self._d, self._d)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        big, left, right, eyes, eye_r, _radius, _cx, _cy = self._geometry()
+
+        self._paint_shadow(p, big)
+        # 把圆内区域先填成控件底色，避免落影从缝隙里透出来
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.palette().color(self.backgroundRole()))
+        p.drawEllipse(big)
+
+        self._paint_fish(p, left, 'run')
+        self._paint_fish(p, right, 'close')
+
+        # 缝隙投影：沿 S 曲线在缝内压一道淡影，两块才像真的分开而不是画上去的
+        _big, _l, _r, _eyes, _er, _radius, _cx, _cy = self._geometry()
+        divider = QPainterPath()
+        divider.moveTo(_cx, _cy - _radius)
+        divider.arcTo(QRectF(_cx - _radius / 2.0, _cy - _radius, _radius, _radius), 90, -180)
+        divider.arcTo(QRectF(_cx - _radius / 2.0, _cy, _radius, _radius), 90, 180)
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        pen = QPen(QColor(0, 0, 0, 32))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.FlatCap)
+        p.setPen(pen)
+        p.translate(1.0, 1.6)
+        p.drawPath(divider)
+        p.restore()
+
+        # 鱼眼：左鱼嵌红点、右鱼嵌绿点
+        self._paint_eye(p, eyes[0], eye_r, self.CLOSE_COLORS, self._run_enabled)
+        self._paint_eye(p, eyes[1], eye_r, self.RUN_COLORS, self._close_enabled)
+
+        self._paint_bezel(p, big)
+        self._paint_text(p)
+        p.end()
+
+    def _paint_bezel(self, p, big):
+        """外圈包边：左上亮、右下暗，让整个圆盘像嵌在面板上。"""
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        ring = QLinearGradient(big.topLeft(), big.bottomRight())
+        ring.setColorAt(0.0, QColor(255, 255, 255, 165))
+        ring.setColorAt(0.45, QColor(255, 255, 255, 25))
+        ring.setColorAt(0.6, QColor(0, 0, 0, 35))
+        ring.setColorAt(1.0, QColor(0, 0, 0, 95))
+        pen = QPen(QBrush(ring), 2.2)
+        p.setPen(pen)
+        p.drawEllipse(big.adjusted(1.1, 1.1, -1.1, -1.1))
+        p.restore()
+
+    # ------------------------- 交互 -------------------------
 
     def mouseMoveEvent(self, event):
         side = self._side_at(event.pos())
@@ -762,7 +845,6 @@ class TaijiLaunchButton(QWidget):
                 self.run_requested.emit()
             else:
                 self.close_requested.emit()
-
 
 class LauncherWindow(QMainWindow):
     def __init__(self):
@@ -835,7 +917,7 @@ class LauncherWindow(QMainWindow):
             add_layout.addWidget(b, 1)
 
         # 太极式启动 / 关闭：单独占据顶部区域，不与其它功能按钮混排
-        self.taiji = TaijiLaunchButton(132)
+        self.taiji = TaijiLaunchButton(160)
 
         taiji_row = QHBoxLayout()
         taiji_row.addStretch(1)

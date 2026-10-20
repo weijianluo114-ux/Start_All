@@ -44,7 +44,7 @@ import launchforge  # noqa: E402
 
 app = QApplication(sys.argv)
 
-btn = launchforge.TaijiLaunchButton(132)
+btn = launchforge.TaijiLaunchButton(160)
 btn.show()
 app.processEvents()
 
@@ -52,23 +52,30 @@ events = []
 btn.run_requested.connect(lambda: events.append("run"))
 btn.close_requested.connect(lambda: events.append("close"))
 
-D = 132
+D = btn._d
 M = btn._margin
 CENTER = QPoint(M + D // 2, M + D // 2)
-LEFT = QPoint(M + int(D * 0.25), M + D // 2)     # 左半圆中部
-RIGHT = QPoint(M + int(D * 0.75), M + D // 2)    # 右半圆中部
+LEFT = QPoint(M + int(D * 0.22), M + D // 2)     # 左鱼主体
+RIGHT = QPoint(M + int(D * 0.78), M + D // 2)    # 右鱼主体
+TOP_BULGE = QPoint(M + D // 2, M + int(D * 0.15))     # 上方隆起（属左鱼）
+BOTTOM_BULGE = QPoint(M + D // 2, M + int(D * 0.85))  # 下方隆起（属右鱼）
 OUTSIDE = QPoint(1, 1)
 
-print("[0] 控件尺寸 = %dx%d，半径=%d，圆心=%s"
-      % (btn.width(), btn.height(), D // 2, (CENTER.x(), CENTER.y())))
+print("[0] 控件尺寸 = %dx%d，直径=%d，圆心=%s"
+      % (btn.width(), btn.height(), D, (CENTER.x(), CENTER.y())))
 
 # ---------- 1. 命中判定 ----------
 assert btn._side_at(LEFT) == "run"
 assert btn._side_at(RIGHT) == "close"
+assert btn._side_at(TOP_BULGE) == "run", "上方隆起应属于左侧（启动）"
+assert btn._side_at(BOTTOM_BULGE) == "close", "下方隆起应属于右侧（关闭）"
 assert btn._side_at(OUTSIDE) is None
 assert btn._side_at(QPoint(CENTER.x(), M - 2)) is None, "圆外上方不应命中"
-print("[1] 命中判定：左=%s 右=%s 圆外=%s"
-      % (btn._side_at(LEFT), btn._side_at(RIGHT), btn._side_at(OUTSIDE)))
+assert btn._side_at(CENTER) is None, "阴阳分隔缝上不应命中"
+assert btn._side_at(CENTER) is None, "阴阳分隔缝上不应命中"
+print("[1] 命中判定：左=%s 右=%s 上隆=%s 下隆=%s 缝隙=%s 圆外=%s"
+      % (btn._side_at(LEFT), btn._side_at(RIGHT), btn._side_at(TOP_BULGE),
+         btn._side_at(BOTTOM_BULGE), btn._side_at(CENTER), btn._side_at(OUTSIDE)))
 
 # ---------- 2. 点击左右两半 ----------
 QTest.mouseClick(btn, Qt.LeftButton, pos=LEFT)
@@ -138,6 +145,8 @@ assert win.taiji.is_run_enabled()
 print("[7] set_run_enabled 开关正常")
 
 # 日志句柄仍占用目录，删除失败不影响结论
-try:/n    shutil.rmtree(SANDBOX, ignore_errors=True)
-except Exception:/n    pass
+try:
+    shutil.rmtree(SANDBOX, ignore_errors=True)
+except Exception:
+    pass
 print("\n需求 6 验收通过：太极控件左右半独立响应，禁用与误触保护生效。")
