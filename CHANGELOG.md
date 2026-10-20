@@ -10,6 +10,8 @@
   **保证仓库根只保留一个可用的 exe**；被运行时占用会明确报错退出，不再静默失败
 - `scripts/build.bat` 构建后改为调用该脚本（原批处理 `del` 在被占用时静默失败，
   v1.7.0 发布后因此残留了 `LaunchForge_v1.6.1.exe`）
+- 反汇编依据的原始程序移出仓库：`reference/一键多启_original_v1.0.0.exe` → 分析工作区
+  `LaunchForge_Reverse\original\`（保留证据，但仓库目录不再有任何历史 exe）
 
 ### Fixed
 - **Release 正文只剩一行 `Full Changelog`**（BUG-004）

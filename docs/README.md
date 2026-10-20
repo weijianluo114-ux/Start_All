@@ -6,7 +6,7 @@
 |---|---|
 | 当前版本 | **v1.7.0** |
 | 源码主副本 | `../src/launchforge.py` |
-| 可执行产物 | `../LaunchForge_v1.7.0.exe`（原始程序存档在 `../reference/`，仅本机、不入库） |
+| 可执行产物 | `../LaunchForge_v1.7.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
 | 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
