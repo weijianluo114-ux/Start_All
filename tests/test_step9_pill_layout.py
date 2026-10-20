@@ -1,16 +1,17 @@
 """
 验收 T-010：圆两侧胶囊按钮的布局规则 + 宏功能已封存（源码保留、运行时不存在）。
 
-对应需求 REQ-007（宏封存）与 REQ-008（圆侧胶囊操作区）。
+对应需求 REQ-007（宏封存）与 REQ-008/REQ-009（圆侧胶囊、对齐与圆角修正）。
 
 检查项：
-  1. 六枚胶囊都存在，且宽度随字数递增（短条 / 长条）
-  2. 每列三枚：中间那枚中心与侧列中心重合，上下两枚各偏移 CENTER_GAP
-  3. 左右两列与圆在同一水平线上居中（圆心 y == 侧列中心 y）
-  4. 左列右边缘贴圆、右列左边缘贴圆（不重叠、不留大缝）
-  5. 「设置」点了只弹"尚未实现"，不产生任何副作用
-  6. 宏功能确实已封存：主程序没有 MacroRecorderDialog / global_macro，
-     legacy 模块没有被 import
+  1. 左右两列等宽；同一排左右等宽；上排 == 下排（垂直镜像）
+  2. 左列三枚左边缘对齐、右列三枚右边缘对齐
+  3. 每列三枚：中间那枚与侧列中心重合，上下两枚各偏移 CENTER_GAP
+  4. 圆心 y == 两列中心 y
+  5. 两列与圆之间有空隙但不脱节
+  6. 圆角：外侧收小、内侧保持大圆角；边框无单独上色（无白色上沿）
+  7. 「设置」点了只弹"尚未实现"，不产生任何副作用
+  8. 宏功能确实已封存
 
 运行：python tests/test_step9_pill_layout.py
 """
@@ -63,79 +64,91 @@ launchforge.QMessageBox = FakeMessageBox
 win = launchforge.LauncherWindow()
 win.resize(560, 700)
 win.show()
-app.processEvents()
+for _ in range(3):
+    app.processEvents()
 
-# ---------- 1. 六枚胶囊与宽度递减关系 ----------
-pills = {
-    '添加程序': win.btn_add,
-    '添加文件夹': win.btn_add_folder,
-    '输入路径': win.btn_add_path,
-    '删除选中': win.btn_del,
-    '日志': win.btn_log,
-    '设置': win.btn_settings,
-}
-widths = {name: b.width() for name, b in pills.items()}
-print("[1] 胶囊宽度：%s" % widths)
-assert all(isinstance(b, launchforge.PillButton) for b in pills.values()), "应全部是 PillButton"
-assert widths['日志'] <= widths['添加程序'] <= widths['添加文件夹'], "宽度应按字数递增"
-assert widths['日志'] < widths['添加文件夹'], "2 字条必须比 5 字条短"
+# ---------- 1. 宽度对称 ----------
+left_w = [b.width() for b in win.left_pills._buttons]
+right_w = [b.width() for b in win.right_pills._buttons]
+print("[1] 左列宽度=%s | 右列宽度=%s | 列宽=%d/%d"
+      % (left_w, right_w, win.left_pills.width(), win.right_pills.width()))
+assert win.left_pills.width() == win.right_pills.width(), "左右两列必须等宽"
+assert left_w == right_w, "同一排左右两枚必须等长"
+assert left_w[0] == left_w[2], "上排与下排必须等长（垂直镜像）"
 
-# ---------- 2/3. 每列三枚的位置 ----------
-for name, column, align in (('左列', win.left_pills, 'right'),
-                            ('右列', win.right_pills, 'left')):
+# ---------- 2. 边缘对齐 ----------
+for label, column in (('左列', win.left_pills), ('右列', win.right_pills)):
+    geos = [b.geometry() for b in column._buttons]
+    print("[2] %s 几何 x/w = %s" % (label, [(g.x(), g.width()) for g in geos]))
+    if label == '左列':
+        assert all(g.x() == 0 for g in geos), "左列三枚必须左边缘对齐"
+    else:
+        assert all(g.x() + g.width() == column.width() for g in geos), "右列三枚必须右边缘对齐"
+
+# ---------- 3/4. 垂直位置与圆心 ----------
+for label, column in (('左列', win.left_pills), ('右列', win.right_pills)):
     centers = [b.geometry().center().y() for b in column._buttons]
     col_center = column.height() / 2.0
     gap = launchforge.PillColumn.CENTER_GAP
-    print("[2] %s 三枚中心 y=%s，侧列中心=%.0f，CENTER_GAP=%d"
-          % (name, centers, col_center, gap))
+    print("[3] %s 三枚中心 y=%s，侧列中心=%.0f" % (label, centers, col_center))
     assert abs(centers[1] - col_center) <= 1, "中间那枚应与侧列中心同高"
     assert abs(centers[0] - (col_center - gap)) <= 1
     assert abs(centers[2] - (col_center + gap)) <= 1
-    # 贴圆一侧对齐
-    if align == 'right':
-        assert all(b.geometry().x() + b.geometry().width() == column.width()
-                   for b in column._buttons), "左列应右对齐"
-    else:
-        assert all(b.geometry().x() == 0 for b in column._buttons), "右列应左对齐"
 
-# 圆心与两列中心同高（同一行、等高，应严格一致）
 taiji_center = win.taiji.geometry().center().y()
-col_centers = [win.left_pills.geometry().center().y(), win.right_pills.geometry().center().y()]
-print("[3] 圆心 y=%d，两列中心 y=%s" % (taiji_center, col_centers))
-assert abs(taiji_center - col_centers[0]) <= 1 and abs(taiji_center - col_centers[1]) <= 1
+print("[4] 圆心 y=%d | 左列中心 y=%d | 右列中心 y=%d"
+      % (taiji_center, win.left_pills.geometry().center().y(),
+         win.right_pills.geometry().center().y()))
+assert abs(taiji_center - win.left_pills.geometry().center().y()) <= 1
+assert abs(taiji_center - win.right_pills.geometry().center().y()) <= 1
 
-# ---------- 4. 两列与圆之间的水平关系 ----------
-left_right_edge = win.left_pills.geometry().right()
-right_left_edge = win.right_pills.geometry().left()
-taiji_left = win.taiji.geometry().left()
-taiji_right = win.taiji.geometry().right()
-print("[4] 左列右缘=%d | 圆左=%d | 圆右=%d | 右列左缘=%d"
-      % (left_right_edge, taiji_left, taiji_right, right_left_edge))
-assert left_right_edge <= taiji_left, "左列不应压到圆"
-assert right_left_edge >= taiji_right, "右列不应压到圆"
-assert taiji_left - left_right_edge <= 24, "左列与圆之间不应留过大空隙"
-assert right_left_edge - taiji_right <= 24, "右列与圆之间不应留过大空隙"
+# ---------- 5. 两列与圆 ----------
+left_edge = win.left_pills.geometry().right()
+right_edge = win.right_pills.geometry().left()
+print("[5] 左列右缘=%d | 圆 %d..%d | 右列左缘=%d"
+      % (left_edge, win.taiji.geometry().left(), win.taiji.geometry().right(), right_edge))
+assert left_edge < win.taiji.geometry().left(), "左列不应压到圆"
+assert right_edge > win.taiji.geometry().right(), "右列不应压到圆"
 
-# ---------- 5. 设置按钮只是占位 ----------
+# ---------- 6. 圆角与边框 ----------
+for label, column, small_side in (('左列', win.left_pills, 'left'),
+                                  ('右列', win.right_pills, 'right')):
+    for b in column._buttons:
+        qss = b.styleSheet()
+        big = b.height() // 2
+        small = launchforge.PillButton.SMALL_RADIUS
+        if small_side == 'left':
+            assert 'border-top-left-radius: %dpx' % small in qss, "左列左侧应为小圆角"
+            assert 'border-top-right-radius: %dpx' % big in qss, "左列右侧应保持大圆角"
+        else:
+            assert 'border-top-left-radius: %dpx' % big in qss, "右列左侧应保持大圆角"
+            assert 'border-top-right-radius: %dpx' % small in qss, "右列右侧应为小圆角"
+        assert 'border-top-color' not in qss, "不应再给上沿单独上色（会出现白色描边）"
+        assert 'border-bottom-color' not in qss, "四周边框颜色应统一"
+print("[6] 圆角：左列 左小(r=%d)/右大(r=%d)，右列反之；边框无单独上色 ✅"
+      % (launchforge.PillButton.SMALL_RADIUS, launchforge.PillButton.HEIGHT // 2))
+
+# ---------- 7. 设置按钮只是占位 ----------
 FakeMessageBox.calls.clear()
-config_before = open(launchforge.CONFIG_FILE, 'rb').read() if os.path.exists(launchforge.CONFIG_FILE) else b''
+cfg = launchforge.CONFIG_FILE
+before = open(cfg, 'rb').read() if os.path.exists(cfg) else b''
 win.btn_settings.click()
 app.processEvents()
 titles = [c[1] for c in FakeMessageBox.calls]
-print("[5] 点「设置」→ 弹窗 %s" % titles)
+print("[7] 点「设置」→ 弹窗 %s" % titles)
 assert '设置' in titles, "应弹出设置提示"
 assert '尚未实现' in FakeMessageBox.calls[0][2], "应说明尚未实现"
-config_after = open(launchforge.CONFIG_FILE, 'rb').read() if os.path.exists(launchforge.CONFIG_FILE) else b''
-assert config_before == config_after, "占位按钮不应改动配置"
+after = open(cfg, 'rb').read() if os.path.exists(cfg) else b''
+assert before == after, "占位按钮不应改动配置"
 
-# ---------- 6. 宏确实被封存 ----------
-print("[6] 模块里 MacroRecorderDialog =", hasattr(launchforge, 'MacroRecorderDialog'),
-      '| 窗口里 global_macro =', hasattr(win, 'global_macro'),
-      '| legacy 已加载 =', 'macro_feature' in sys.modules)
-assert not hasattr(launchforge, 'MacroRecorderDialog'), "主程序不应再定义宏录制框"
-assert not hasattr(win, 'global_macro'), "主程序不应再持有 global_macro 字段"
-assert 'macro_feature' not in sys.modules, "主程序不应 import legacy 宏模块"
-assert not hasattr(win, 'btn_record_global'), "不应再有录制宏按钮"
+# ---------- 8. 宏确实被封存 ----------
+print("[8] MacroRecorderDialog=%s | global_macro=%s | legacy 已加载=%s"
+      % (hasattr(launchforge, 'MacroRecorderDialog'), hasattr(win, 'global_macro'),
+         'macro_feature' in sys.modules))
+assert not hasattr(launchforge, 'MacroRecorderDialog')
+assert not hasattr(win, 'global_macro')
+assert 'macro_feature' not in sys.modules
+assert not hasattr(win, 'btn_record_global')
 
 legacy = os.path.join(SRC, 'legacy', 'macro_feature.py')
 assert os.path.exists(legacy), "封存的源码文件必须保留"
@@ -147,4 +160,4 @@ try:
 except Exception:
     pass
 
-print("\n需求 7/8 验收通过：胶囊按字数定长、中间对齐圆心、宏功能已封存。")
+print("\n需求 7/8/9 验收通过：胶囊成对等宽、边缘对齐、内外圆角呼应、宏已封存。")

@@ -776,8 +776,10 @@ class PillButton(QPushButton):
     """
     象牙白 + 灰金的胶囊按钮。
 
-    宽度不写死：按文字实际宽度算出来，所以「日志」「设置」是短条、「添加文件夹」是长条——
-    这就是需求里"按字数给不同长度的圆角矩形条"。高度统一，圆角取一半，两端是完整半圆。
+    宽度由外部给定（列内同一排左右等宽），高度固定 38。
+
+    圆角按"内外呼应"区分：贴圆的一侧保持大圆角（= 高度一半），朝边框的一侧收小，
+    左侧列收左边、右侧列收右边，两列合起来正好对着面板的外缘，视觉上像被削平了一样。
 
     compact=True 用于预设行（新建 / 删除），尺寸更小但外观完全同源。
     """
@@ -790,16 +792,19 @@ class PillButton(QPushButton):
     PADDING_COMPACT = 13
     MIN_WIDTH_COMPACT = 58
 
-    # 浅色胶囊压在浅色面板上，靠"上沿亮边 + 下沿暗边 + 竖向渐变"做出压铸感，
-    # 不使用 QGraphicsDropShadowEffect——那会把整枚按钮先离屏渲染再模糊，文字会发虚。
+    SMALL_RADIUS = 8        # 朝外一侧的小圆角
+
+    # 四角独立设置；只保留一圈统一描边色，不再给上下沿单独上色
+    # （上沿白色描边曾在浅色面板上显出一条亮线，与其余三边不一致）。
     _QSS = """
     QPushButton {{
         background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                           stop:0 #FFFFFF, stop:0.5 #FDFAF3, stop:1 #F1E9D9);
         border: 1px solid #BEAD86;
-        border-top-color: #F2EAD8;
-        border-bottom-color: #AB9C77;
-        border-radius: {radius}px;
+        border-top-left-radius: {tl}px;
+        border-top-right-radius: {tr}px;
+        border-bottom-left-radius: {bl}px;
+        border-bottom-right-radius: {br}px;
         color: #383227;
         padding: 0 1px;
     }}
@@ -807,14 +812,12 @@ class PillButton(QPushButton):
         background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                           stop:0 #FFFFFF, stop:0.5 #FCF8F0, stop:1 #F2EBDC);
         border-color: #B0955C;
-        border-top-color: #F1E7D0;
         color: #1C1810;
     }}
     QPushButton:pressed {{
         background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                           stop:0 #E4D9C1, stop:1 #F3EDE0);
         border-color: #99813F;
-        border-top-color: #C9B893;
     }}
     QPushButton:disabled {{
         color: #A79E8B;
@@ -823,17 +826,31 @@ class PillButton(QPushButton):
     }}
     """
 
-    def __init__(self, text, parent=None, compact=False):
+    def __init__(self, text, parent=None, compact=False, small_side=None):
         super().__init__(text, parent)
         self._compact = compact
         self._height = self.HEIGHT_COMPACT if compact else self.HEIGHT
         self._padding = self.PADDING_COMPACT if compact else self.SIDE_PADDING
         self._min_width = self.MIN_WIDTH_COMPACT if compact else self.MIN_WIDTH
+        self._small_side = small_side          # None / 'left' / 'right'
 
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(self._height)
         self.setFont(pill_font(compact))
-        self.setStyleSheet(self._QSS.format(radius=self._height // 2))
+        self._apply_style()
+
+    def _apply_style(self):
+        big = self._height // 2
+        small = min(self.SMALL_RADIUS, big)
+        if self._small_side == 'left':
+            tl = bl = small
+            tr = br = big
+        elif self._small_side == 'right':
+            tl = bl = big
+            tr = br = small
+        else:
+            tl = tr = bl = br = big
+        self.setStyleSheet(self._QSS.format(tl=tl, tr=tr, bl=bl, br=br))
 
     def sizeHint(self):
         metrics = self.fontMetrics()
@@ -847,29 +864,31 @@ class PillColumn(QWidget):
 
     用绝对定位而不是 QVBoxLayout，因为布局只能平均分配剩余空间，
     做不到"中间那枚严格对齐圆心"这条视觉规则。
-    align='right' 表示这一列在圆的左边（右边缘贴圆），'left' 反之。
+
+    side='left'  这一列在圆的左边，按钮左边缘对齐（贴面板左侧）；
+    side='right' 这一列在圆的右边，按钮右边缘对齐（贴面板右侧）。
+    宽度由 widths 逐排给定，左右两列传同一组值，保证成对等宽、上下对称。
     """
 
     CENTER_GAP = 66        # 中间那枚与上下两枚的中心距
 
-    def __init__(self, buttons, align, height, parent=None):
+    def __init__(self, buttons, side, height, widths=None, parent=None):
         super().__init__(parent)
         self._buttons = list(buttons)
-        self._align = align
+        self._side = side
+        self._widths = list(widths) if widths else [b.sizeHint().width() for b in self._buttons]
+        assert len(self._widths) == len(self._buttons), '每枚按钮都要有对应宽度'
         for btn in self._buttons:
             btn.setParent(self)
-        self.setFixedSize(self._ideal_width(), height)
+        self.setFixedSize(max(self._widths), height)
         self._relayout()
-
-    def _ideal_width(self):
-        return max(btn.sizeHint().width() for btn in self._buttons)
 
     def _relayout(self):
         center_y = self.height() / 2.0
         offsets = (-self.CENTER_GAP, 0, self.CENTER_GAP)
-        for btn, dy in zip(self._buttons, offsets):
-            width = btn.sizeHint().width()
-            x = self.width() - width if self._align == 'right' else 0
+        for btn, dy, width in zip(self._buttons, offsets, self._widths):
+            width = min(width, self.width())
+            x = 0 if self._side == 'left' else self.width() - width
             btn.setGeometry(int(x),
                             int(center_y + dy - btn.height() / 2.0),
                             int(width), btn.height())
@@ -952,23 +971,30 @@ class LauncherWindow(QMainWindow):
 
         # 六项操作做成胶囊条，挂在圆的左右两侧——中间只留一颗圆，不与按钮堆在一起。
         # 文字不用 emoji：彩色图标会破坏象牙白 + 灰金的整体质感。
-        self.btn_add = PillButton('添加程序')
-        self.btn_add_folder = PillButton('添加文件夹')
-        self.btn_add_path = PillButton('输入路径')
-        self.btn_del = PillButton('删除选中')
-        self.btn_log = PillButton('日志')
-        self.btn_settings = PillButton('设置')
+        # small_side 决定"朝外的那一侧收小圆角"：左列收左边、右列收右边，两列内外呼应。
+        self.btn_add = PillButton('添加程序', small_side='left')
+        self.btn_add_folder = PillButton('添加文件夹', small_side='left')
+        self.btn_add_path = PillButton('输入路径', small_side='left')
+        self.btn_del = PillButton('删除选中', small_side='right')
+        self.btn_log = PillButton('日志', small_side='right')
+        self.btn_settings = PillButton('设置', small_side='right')
 
         # 顺序即位置：第 1 个在上、第 3 个在下，中间那枚与圆心同高。
-        # 左列「添加文件夹」5 字最长放上端；两个 4 字并列时把最常用的「添加程序」
-        # 放中间（离圆心最近、最好点），「输入路径」放下面。
-        # 右列「删除选中」4 字在上，两个 2 字短条（日志 / 设置）占中间与下方。
+        # 宽度规则（REQ-009）：同一排左右等宽，且上排与下排取同一个值，
+        # 这样左右成对一致、上下关于中线镜像，整体才是对称的。
         self.taiji = TaijiLaunchButton(160)
         pills_height = self.taiji.height()
+        w_outer = max(btn.sizeHint().width() for btn in
+                      (self.btn_add_folder, self.btn_del, self.btn_add_path, self.btn_settings))
+        w_mid = max(btn.sizeHint().width() for btn in (self.btn_add, self.btn_log))
+        row_widths = [w_outer, w_mid, w_outer]
+
         self.left_pills = PillColumn(
-            [self.btn_add_folder, self.btn_add, self.btn_add_path], 'right', pills_height)
+            [self.btn_add_folder, self.btn_add, self.btn_add_path],
+            'left', pills_height, widths=row_widths)
         self.right_pills = PillColumn(
-            [self.btn_del, self.btn_log, self.btn_settings], 'left', pills_height)
+            [self.btn_del, self.btn_log, self.btn_settings],
+            'right', pills_height, widths=row_widths)
 
         taiji_row = QHBoxLayout()
         taiji_row.setSpacing(12)
