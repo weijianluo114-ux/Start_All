@@ -10,6 +10,8 @@
   `docs/` 放文档、版本级日志提到根 `CHANGELOG.md`
 - 新增 `.gitignore` / `.gitattributes` / `LICENSE`（MIT）/ 英文 README 徽章
 - 新增 `.github/workflows/build.yml`：推送 `v*` 标签自动在 Windows 上构建并创建 Release
+  - 发布资产统一为 `LaunchForge_vX.Y.Z.exe`（ASCII）；GitHub Actions 会丢失非 ASCII 文件名字符
+  - Release 正文追加「下载与使用」固定说明块
 - `scripts/build.bat` 改为从 `APP_VERSION` 读版本号，产物同时落到 `dist/` 与仓库根
 - 清理历史 exe 与 `.spec`：仓库根只保留当前可用版本，原始程序移入 `reference/`（已 gitignore）
 
