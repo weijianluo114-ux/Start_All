@@ -14,8 +14,11 @@ from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QFileDialog, QWidget, QMessageBox,
     QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog
 )
-from PyQt5.QtCore import Qt, QTimer, QDir
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon
+from PyQt5.QtCore import Qt, QTimer, QDir, QRectF, QPointF, pyqtSignal
+from PyQt5.QtGui import (
+    QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
+    QLinearGradient, QRadialGradient, QPainterPath
+)
 
 try:
     from win32com.client import Dispatch
@@ -499,6 +502,268 @@ class MacroRecorderDialog(QDialog):
         event.accept()
 
 
+class TaijiLaunchButton(QWidget):
+    """
+    太极式双半圆控件：左半绿「启动」、右半红「关闭」，整圆带 3D 凸起质感。
+
+    设计要点：
+      · 一个整圆按垂直直径分成两个半圆，每个半圆独立响应点击，互不干扰；
+      · 3D 效果不依赖图片：对角线性渐变（左上亮 → 右下暗）+ 顶部镜面高光
+        + 底部内阴影 + 外圈上亮下暗描边 + 柔和落影，四层叠加形成"凸起"错觉；
+      · 禁用态用中性灰，禁用左半（启动中）时不会连带灰掉右半边。
+    """
+
+    run_requested = pyqtSignal()
+    close_requested = pyqtSignal()
+
+    # 每个半圆三段色：高光 / 本色 / 暗部
+    RUN_COLORS = ('#7CE79B', '#25B45F', '#0F6E3C')
+    CLOSE_COLORS = ('#FB8B7B', '#D93E33', '#76170F')
+    IDLE_COLORS = ('#EDEDED', '#CFCFCF', '#A6A6A6')
+
+    def __init__(self, diameter=132, parent=None):
+        super().__init__(parent)
+        self._d = int(diameter)
+        self._margin = 14                      # 留给落影的空间
+        self.setFixedSize(self._d + self._margin * 2, self._d + self._margin * 2)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip('左半圆：一键启动当前预设　|　右半圆：关闭列表内的程序与文件夹窗口')
+        self._hover = None
+        self._pressed = None
+        self._run_enabled = True
+        self._close_enabled = True
+
+    # ------------------------- 对外接口 -------------------------
+
+    def set_run_enabled(self, enabled):
+        self._run_enabled = bool(enabled)
+        if not self._run_enabled and self._hover == 'run':
+            self._hover = None
+        self.update()
+
+    def is_run_enabled(self):
+        return self._run_enabled
+
+    def set_close_enabled(self, enabled):
+        self._close_enabled = bool(enabled)
+        self.update()
+
+    # ------------------------- 绘制 -------------------------
+
+    def _rect(self):
+        return QRectF(self._margin, self._margin, self._d, self._d)
+
+    def _half_path(self, rect, side):
+        """半圆路径：从正上方沿圆弧走到正下方，再沿垂直直径闭合。"""
+        path = QPainterPath()
+        top = QPointF(rect.center().x(), rect.top())
+        path.moveTo(top)
+        # Qt 角度以 3 点钟为 0°、逆时针为正
+        path.arcTo(rect, 90, 180 if side == 'run' else -180)
+        path.lineTo(top)
+        path.closeSubpath()
+        return path
+
+    def _colors(self, side):
+        enabled = self._run_enabled if side == 'run' else self._close_enabled
+        if not enabled:
+            base = self.IDLE_COLORS
+        else:
+            base = self.RUN_COLORS if side == 'run' else self.CLOSE_COLORS
+        light, main, dark = (QColor(c) for c in base)
+        if enabled and self._pressed == side:
+            light, main, dark = (c.darker(112) for c in (light, main, dark))
+        elif enabled and self._hover == side:
+            light, main, dark = (c.lighter(108) for c in (light, main, dark))
+        return enabled, light, main, dark
+
+    def _paint_shadow(self, p, rect):
+        """落影：多层低透明度椭圆叠加，避免依赖模糊滤镜。"""
+        p.save()
+        p.setPen(Qt.NoPen)
+        for offset, spread, alpha in ((2, 0, 38), (5, 1, 26), (8, 2, 16), (12, 4, 9)):
+            r = rect.adjusted(-spread, -spread + offset, spread, spread + offset)
+            p.setBrush(QColor(0, 0, 0, alpha))
+            p.drawEllipse(r)
+        p.restore()
+
+    def _paint_half(self, p, rect, side):
+        enabled, light, main, dark = self._colors(side)
+        path = self._half_path(rect, side)
+
+        p.save()
+        p.setClipPath(path)
+
+        # 1) 主渐变：左上亮 → 右下暗，模拟从左上方打光
+        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        grad.setColorAt(0.0, light)
+        grad.setColorAt(0.55, main)
+        grad.setColorAt(1.0, dark)
+        p.fillPath(path, QBrush(grad))
+
+        # 2) 顶部镜面高光：椭圆径向渐变，落在每个半圆的靠外上方
+        offset = -rect.width() * 0.16 if side == 'run' else rect.width() * 0.16
+        spec = QRadialGradient(
+            QPointF(rect.center().x() + offset, rect.top() + rect.height() * 0.24),
+            rect.width() * 0.55)
+        spec.setColorAt(0.0, QColor(255, 255, 255, 130 if enabled else 70))
+        spec.setColorAt(0.6, QColor(255, 255, 255, 40 if enabled else 22))
+        spec.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillPath(path, QBrush(spec))
+
+        # 3) 底部内阴影：让圆有厚度，不是一张贴纸
+        shade = QLinearGradient(
+            QPointF(rect.left(), rect.bottom() - rect.height() * 0.42),
+            QPointF(rect.left(), rect.bottom()))
+        shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+        shade.setColorAt(1.0, QColor(0, 0, 0, 70 if enabled else 34))
+        p.fillPath(path, QBrush(shade))
+
+        # 4) 半圆轮廓
+        p.setClipping(False)
+        pen = QPen(dark if enabled else QColor('#9E9E9E'))
+        pen.setWidthF(1.3)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+        # 5) 交互态：只描弧线，避免在中缝上画出多余亮线
+        if enabled and (self._hover == side or self._pressed == side):
+            inset = rect.adjusted(1.4, 1.4, -1.4, -1.4)
+            if self._pressed == side:
+                rim, width = QColor(0, 0, 0, 80), 2.0
+            else:
+                rim, width = QColor(255, 255, 255, 115), 2.2
+            pen = QPen(rim)
+            pen.setWidthF(width)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawArc(inset, 90 * 16, (180 if side == 'run' else -180) * 16)
+        p.restore()
+
+    def _paint_bevel(self, p, rect):
+        """整圆外圈的上亮下暗描边，强化球面感。"""
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        inner = rect.adjusted(0.9, 0.9, -0.9, -0.9)
+        pen = QPen(QColor(255, 255, 255, 110))
+        pen.setWidthF(1.9)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(inner, 30 * 16, 120 * 16)
+        pen = QPen(QColor(0, 0, 0, 70))
+        pen.setWidthF(1.7)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(inner, 210 * 16, 120 * 16)
+        p.restore()
+
+    def _paint_seam(self, p, rect):
+        """中缝：一条暗线 + 一条偏右的亮线，做出"被分开"的折痕。"""
+        p.save()
+        cx = rect.center().x()
+        pen = QPen(QColor(0, 0, 0, 55))
+        pen.setWidthF(1.4)
+        p.setPen(pen)
+        p.drawLine(QPointF(cx, rect.top() + 1.5), QPointF(cx, rect.bottom() - 1.5))
+        pen = QPen(QColor(255, 255, 255, 85))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.drawLine(QPointF(cx + 1.2, rect.top() + 3), QPointF(cx + 1.2, rect.bottom() - 3))
+        p.restore()
+
+    def _paint_text(self, p, rect):
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setWeight(QFont.Black)
+        font.setPixelSize(max(14, int(self._d * 0.175)))
+        p.save()
+        p.setFont(font)
+        for side, text, rotation in (('run', '启动', 90), ('close', '关闭', 90)):
+            enabled = self._run_enabled if side == 'run' else self._close_enabled
+            p.save()
+            shift = -rect.width() * 0.255 if side == 'run' else rect.width() * 0.255
+            p.translate(rect.center().x() + shift, rect.center().y())
+            p.rotate(rotation)
+            fm = p.fontMetrics()
+            text_w = fm.boundingRect(text).width()
+            text_h = fm.height()
+            box = QRectF(-text_w / 2 - 3, -text_h / 2 - 2, text_w + 6, text_h + 4)
+            # 文字投影，避免压在亮部看不清
+            p.setPen(QColor(0, 0, 0, 75 if enabled else 45))
+            p.drawText(box.translated(0, 1.5), Qt.AlignCenter, text)
+            p.setPen(QColor(255, 255, 255, 252 if enabled else 160))
+            p.drawText(box, Qt.AlignCenter, text)
+            p.restore()
+        p.restore()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        rect = self._rect()
+        self._paint_shadow(p, rect)
+        self._paint_half(p, rect, 'run')
+        self._paint_half(p, rect, 'close')
+        self._paint_bevel(p, rect)
+        self._paint_seam(p, rect)
+        self._paint_text(p, rect)
+        p.end()
+
+    # ------------------------- 交互 -------------------------
+
+    def _side_at(self, pos):
+        """命中判定：圆内才响应，按垂直直径划分左右。"""
+        cx = cy = self._margin + self._d / 2.0
+        dx, dy = pos.x() - cx, pos.y() - cy
+        if dx * dx + dy * dy > (self._d / 2.0) ** 2:
+            return None
+        return 'run' if dx < 0 else 'close'
+
+    def _side_enabled(self, side):
+        if side == 'run':
+            return self._run_enabled
+        if side == 'close':
+            return self._close_enabled
+        return False
+
+    def mouseMoveEvent(self, event):
+        side = self._side_at(event.pos())
+        if not self._side_enabled(side):
+            side = None
+        if side != self._hover:
+            self._hover = side
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        side = self._side_at(event.pos())
+        self._pressed = side if self._side_enabled(side) else None
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        side = self._side_at(event.pos())
+        pressed = self._pressed
+        self._pressed = None
+        self.update()
+        if side and side == pressed and self._side_enabled(side):
+            if side == 'run':
+                self.run_requested.emit()
+            else:
+                self.close_requested.emit()
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -569,14 +834,13 @@ class LauncherWindow(QMainWindow):
         for b in (self.btn_add, self.btn_add_folder, self.btn_add_path, self.btn_del):
             add_layout.addWidget(b, 1)
 
-        # 启动 / 关闭（第二行）
-        self.btn_run = QPushButton('🚀 一键启动')
-        self.btn_kill_all = QPushButton('⏹ 关闭全部')
-        self.btn_kill_all.setToolTip('关闭列表内正在运行的程序，并关闭列表内文件夹对应的资源管理器窗口')
+        # 太极式启动 / 关闭：单独占据顶部区域，不与其它功能按钮混排
+        self.taiji = TaijiLaunchButton(132)
 
-        run_layout = QHBoxLayout()
-        run_layout.addWidget(self.btn_run, 2)
-        run_layout.addWidget(self.btn_kill_all, 1)
+        taiji_row = QHBoxLayout()
+        taiji_row.addStretch(1)
+        taiji_row.addWidget(self.taiji)
+        taiji_row.addStretch(1)
 
         # 全局宏按钮
         self.btn_record_global = QPushButton('🎬 录制总宏')
@@ -595,10 +859,12 @@ class LauncherWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(10)
+        layout.addLayout(taiji_row)
         layout.addLayout(preset_layout)
         layout.addWidget(self.list_widget)
         layout.addLayout(add_layout)
-        layout.addLayout(run_layout)
         layout.addLayout(macro_layout)
 
         # 填充预设下拉框
@@ -624,9 +890,9 @@ class LauncherWindow(QMainWindow):
         self.btn_add_folder.clicked.connect(self.add_folder_dialog)
         self.btn_add_path.clicked.connect(self.add_path_manually)
         self.btn_del.clicked.connect(self.remove_selected)
-        self.btn_run.clicked.connect(self.launch_all)
+        self.taiji.run_requested.connect(self.launch_all)
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
-        self.btn_kill_all.clicked.connect(self.close_all_programs)
+        self.taiji.close_requested.connect(self.close_all_programs)
 
         self.btn_record_global.clicked.connect(self.record_global_macro)
         self.btn_play_global.clicked.connect(self.play_global_macro)
@@ -899,7 +1165,7 @@ class LauncherWindow(QMainWindow):
         paths = [self.list_widget.item(i).data(Qt.UserRole) for i in range(self.list_widget.count())]
         log.info('一键启动：预设=%s，共 %d 项', self.current_preset_name, len(paths))
 
-        self.btn_run.setEnabled(False)
+        self.taiji.set_run_enabled(False)
         self._launching = True
         self._stop_launch = False
 
@@ -978,7 +1244,7 @@ class LauncherWindow(QMainWindow):
             threading.Thread(target=run, daemon=True).start()
     def _launch_finished(self):
         self._launching = False
-        self.btn_run.setEnabled(True)
+        self.taiji.set_run_enabled(True)
 
     # ------------------------- 关闭程序 -------------------------
 
@@ -1601,6 +1867,6 @@ class LauncherWindow(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = LauncherWindow()
-    window.resize(500, 500)
+    window.resize(520, 680)
     window.show()
     sys.exit(app.exec_())
