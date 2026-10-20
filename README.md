@@ -77,7 +77,9 @@ scripts\build.bat
 ```
 
 脚本会从 `src\launchforge.py` 读取 `APP_VERSION`，产出 `dist\LaunchForge_vX.Y.Z.exe`，
-复制一份到仓库根目录作为当前可用测试版，并**自动重建桌面快捷方式**、清理旧版本 exe。
+复制一份到仓库根目录作为当前可用测试版，并**自动重建桌面快捷方式**；
+最后调用 `scripts\clean_artifacts.py` 删掉旧版本 exe 与 `build\`、`dist\`、`*.spec`——
+**仓库根永远只保留当前版本的一个 exe**，历史版本由 Releases 保存。
 
 > 快捷方式（`.lnk`）存的是带版本号的绝对路径，因此版本一变就必须重建；
 > `build.bat` 已通过 `scripts/update_shortcut.py` 自动完成，无需手工改。

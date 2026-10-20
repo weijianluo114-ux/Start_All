@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Changed（构建）
+- 新增 `scripts/clean_artifacts.py`：清理非当前版本的 exe 与 `build/`、`dist/`、`*.spec`，
+  **保证仓库根只保留一个可用的 exe**；被运行时占用会明确报错退出，不再静默失败
+- `scripts/build.bat` 构建后改为调用该脚本（原批处理 `del` 在被占用时静默失败，
+  v1.7.0 发布后因此残留了 `LaunchForge_v1.6.1.exe`）
+
 ### Fixed
 - **Release 正文只剩一行 `Full Changelog`**（BUG-004）
   - `append_body` 是布尔开关，不承载正文；改为 `Prepare release body` 步骤生成

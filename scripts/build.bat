@@ -46,14 +46,15 @@ REM A .lnk stores an absolute path, so it MUST be rebuilt after a version bump.
 python scripts\update_shortcut.py "%CD%\%OUTNAME%.exe"
 if errorlevel 1 echo [WARN] shortcut update failed, point it manually to %OUTNAME%.exe
 
-echo [post] Remove older local builds...
-for %%f in ("LaunchForge_v*.exe") do (
-    if /i not "%%~nxf"=="%OUTNAME%.exe" del /q "%%f" 2>nul
-)
+echo [post] Keep only the current build (remove old exe / dist / build / spec)...
+REM Repo root must hold exactly ONE exe: the current version. History lives in GitHub Releases.
+REM Do NOT use batch `del` here: it fails silently when the file is in use.
+python scripts\clean_artifacts.py --keep "%OUTNAME%.exe"
+if errorlevel 1 echo [WARN] cleanup incomplete - close the running instance and rerun clean_artifacts.py
 
 echo.
-echo Done: dist\%OUTNAME%.exe
-echo Copied to repo root: %OUTNAME%.exe
+echo Built: %OUTNAME%.exe
+echo Repo root now holds only that one exe. History is on GitHub Releases.
 pause
 exit /b 0
 
