@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Release 正文只剩一行 `Full Changelog`**（BUG-004）
+  - `append_body` 是布尔开关，不承载正文；改为 `Prepare release body` 步骤生成
+    `release_body.md`，再由 `body_path` 提供给发布动作
+  - 顺带修掉两个语法坑：YAML 块标量里 here-string 结束符被缩进、正文中的中文引号
+    被当作字符串定界符
+
 ### Changed（工程化，不改行为）
 - 仓库按主流布局重组：`src/` 放源码、`assets/` 放图标、`scripts/` 放构建脚本、
   `docs/` 放文档、版本级日志提到根 `CHANGELOG.md`

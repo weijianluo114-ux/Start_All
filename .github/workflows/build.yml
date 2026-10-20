@@ -71,21 +71,48 @@ jobs:
           path: dist/*.exe
           retention-days: 30
 
+      - name: Prepare release body
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          $repo = "https://github.com/weijianluo114-ux/Start_All"
+          # 用数组拼正文，避免 PowerShell here-string：YAML 块标量会保留两格缩进，
+          # 而 here-string 的结束符必须顶格，缩进后会直接报语法错误。
+          $lines = @(
+            "## 一键多启 v$ver",
+            "",
+            "### 本次变更",
+            "完整变更见 [CHANGELOG]($repo/blob/main/CHANGELOG.md)。",
+            "",
+            "### 下载与使用",
+            "",
+            "1. 下载下方 **LaunchForge_v$ver.exe**；",
+            "2. 放到任意目录双击运行，无需安装 Python 或依赖；",
+            "3. 配置与日志在 **%LOCALAPPDATA%\MultiLauncher**，删除该目录即可完全重置。",
+            "",
+            "> 未做代码签名，首次运行若出现 SmartScreen 提示，选择「更多信息 → 仍要运行」。",
+            "",
+            "### 已知限制",
+            "",
+            "- 文件夹只能**整窗关闭**：Windows 未提供「关闭某个标签页」的稳定接口（详见 docs/04-问题/Q-003）",
+            "- 按镜像名关闭会命中同名全部实例",
+            "- .bat / .cmd 条目启动时仍显示控制台窗口（批处理需要，属预期行为）",
+            "",
+            "使用说明见 [README]($repo#readme)。"
+          )
+          $body = $lines -join "`n"
+          [System.IO.File]::WriteAllText("$PWD/release_body.md", $body,
+              (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "--- release_body.md ---"
+          Get-Content release_body.md
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.exe
-          generate_release_notes: true
-          append_body: |
-            ## 下载与使用
-
-            1. 下载下方 `LaunchForge_vX.Y.Z.exe`；
-            2. 放到任意目录双击运行，无需安装；
-            3. 配置与日志在 `%LOCALAPPDATA%\MultiLauncher`（删除该目录即可重置）。
-
-            详细说明见 [README](https://github.com/weijianluo114-ux/Start_All#readme)，
-            变更记录见 [CHANGELOG](https://github.com/weijianluo114-ux/Start_All/blob/main/CHANGELOG.md)。
-
-            > 未做代码签名，首次运行若出现 SmartScreen 提示，选择“更多信息 → 仍要运行”。
+          # append_body 是布尔开关（默认 false），不能直接塞正文；正文改用 body_path。
+          # 也不再依赖 generate_release_notes：它只产出 "Full Changelog" 一行，信息量太低。
+          body_path: release_body.md
           fail_on_unmatched_files: true
