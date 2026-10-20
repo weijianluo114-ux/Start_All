@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path src/launchforge.py -Pattern '^APP_VERSION\s*=' | Select-Object -First 1
+          if (-not $line) { throw 'APP_VERSION not found' }
+          $ver = ($line.Line -split "'")[1]
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "name=一键多启_v$ver" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $ver"
+
+      - name: Syntax check
+        run: python -m py_compile src/launchforge.py
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --onefile --windowed `
+            --icon=assets/logo.ico `
+            --add-data "assets/logo.ico;." `
+            --version-file=version.txt `
+            --name "${{ steps.ver.outputs.name }}" `
+            src/launchforge.py
+
+      - name: Verify artifact
+        shell: pwsh
+        run: |
+          $f = "dist/${{ steps.ver.outputs.name }}.exe"
+          if (-not (Test-Path $f)) { throw "artifact missing: $f" }
+          $item = Get-Item $f
+          Write-Host ("size = {0:N0} bytes" -f $item.Length)
+          $item.VersionInfo | Format-List FileVersion, ProductVersion, FileDescription
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-${{ steps.ver.outputs.version }}
+          path: dist/*.exe
+          retention-days: 30
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,20 @@
+# 默认按文本处理并统一 LF，避免跨平台 diff 抖动
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF，避免 cmd/PowerShell 解析问题
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Python / 文档显式声明
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制
+*.ico   binary
+*.png   binary
+*.exe   binary
