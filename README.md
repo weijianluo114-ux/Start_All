@@ -24,7 +24,10 @@
 ## 下载
 
 前往 [Releases](https://github.com/weijianluo114-ux/Start_All/releases) 下载最新的
-`一键多启_vX.Y.Z.exe`，双击即可运行，无需安装 Python 或依赖。
+`LaunchForge_vX.Y.Z.exe`（CI 构建产物），双击即可运行，无需安装 Python 或依赖。
+
+> 本地用 `scripts\build.bat` 构建时产物名为 `一键多启_vX.Y.Z.exe`，两者内容一致，
+> 只是发布资产使用 ASCII 文件名（GitHub Actions 处理非 ASCII 文件名会丢字符）。
 
 - 配置与日志目录：`%LOCALAPPDATA%\MultiLauncher`
 - 完全重置：删除该目录即可

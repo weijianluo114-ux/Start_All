@@ -6,9 +6,12 @@
 |---|---|
 | 当前版本 | **v1.6.1** |
 | 源码主副本 | `../src/launchforge.py` |
-| 可执行产物 | `../一键多启_v1.6.1.exe`（原始程序 `../一键多启.exe` 作为对照基线，勿覆盖） |
+| 可执行产物 | `../一键多启_v1.6.1.exe`（原始程序存档在 `../reference/`，仅本机、不入库） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
+| 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
+| 构建与发布 | `07-逆向与构建/构建与发布.md`（含 GitHub Actions 与 tag 流程） |
+| 版本级日志 | 仓库根 `../CHANGELOG.md` |
 
 ## 文档地图
 

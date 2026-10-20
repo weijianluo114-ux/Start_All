@@ -37,7 +37,9 @@ jobs:
           if (-not $line) { throw 'APP_VERSION not found' }
           $ver = ($line.Line -split "'")[1]
           "version=$ver" >> $env:GITHUB_OUTPUT
-          "name=一键多启_v$ver" >> $env:GITHUB_OUTPUT
+          # 注意：发布资产用 ASCII 名。GitHub Actions 处理非 ASCII 文件名时会丢字符
+          # （v1.6.1 曾产出 _v1.6.1.exe），因此这里统一用 LaunchForge_vX.Y.Z。
+          "name=LaunchForge_v$ver" >> $env:GITHUB_OUTPUT
           Write-Host "version = $ver"
 
       - name: Syntax check
