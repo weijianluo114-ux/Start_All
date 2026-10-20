@@ -1,8 +1,14 @@
 # FEAT-004 · 全局鼠标宏
 
-- **状态**：可用（依赖 `pynput`）
+- **状态**：**已封存（v1.9.0）** —— 界面上已无入口，源码保留但不参与编译与打包
 - **首次版本**：v1.0.0（还原基线）
-- **关联**：`MacroRecorderDialog`、`LauncherWindow.record_global_macro` / `play_global_macro` / `_play_macro`
+- **封存版本**：v1.9.0（原因与恢复步骤见 `REQ-007`）
+- **关联**：`src/legacy/macro_feature.py` 中的 `MacroRecorderDialog` / `play_macro`
+
+> **本文档自 v1.9.0 起转为历史参考。**
+> 宏的完整实现已搬到 `src/legacy/macro_feature.py`，主程序不再 import，
+> 因此既不显示入口也不打进 exe。下文描述的是封存前的行为，
+> 恢复该功能时按模块文档字符串里的三步接回即可。
 
 ## 它做什么
 

@@ -1,3 +1,4 @@
 PyQt5>=5.15.0
 pywin32>=228
-pynput>=1.7.6
+# pynput 随「全局鼠标宏」一并封存（见 src/legacy/macro_feature.py）。
+# 需要恢复该功能时再装：pip install pynput>=1.7.6

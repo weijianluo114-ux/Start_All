@@ -12,9 +12,10 @@ import ctypes
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QWidget, QMessageBox,
-    QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog
+    QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog,
+    QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt, QTimer, QDir, QRectF, QPointF, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QDir, QRectF, QPointF, QSize, pyqtSignal
 from PyQt5.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
     QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker
@@ -26,13 +27,8 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
-try:
-    from pynput.mouse import Listener as MouseListener, Button, Controller as MouseController
-    from pynput.keyboard import Listener as KeyboardListener, Key
-    HAS_PYNPUT = True
-except ImportError:
-    HAS_PYNPUT = False
-    print('警告：未安装 pynput，鼠标宏功能不可用。请执行 pip install pynput')
+# 全局鼠标宏已于 v1.9.0 封存：实现移至 src/legacy/macro_feature.py，
+# 本文件不再 import 它，因此 PyInstaller 不会收集，pynput 也不再是运行时依赖。
 
 try:
     import win32gui
@@ -64,7 +60,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.8.0'
+APP_VERSION = '1.9.0'
 
 log = logging.getLogger('launchforge')
 
@@ -394,114 +390,6 @@ def list_explorer_windows():
     return result
 
 
-class MacroRecorderDialog(QDialog):
-    """录制鼠标宏的对话框（用于全局宏）"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('录制全局鼠标宏')
-        self.setModal(True)
-        self.setMinimumSize(300, 120)
-
-        layout = QVBoxLayout(self)
-        self.label = QLabel('开始录制，请执行鼠标操作...\n点击「停止录制」或关闭窗口结束。')
-        layout.addWidget(self.label)
-
-        self.btn_stop = QPushButton('停止录制')
-        self.btn_stop.clicked.connect(self.stop_recording)
-        layout.addWidget(self.btn_stop)
-
-        self.events = []
-        self.recording = False
-        self.start_time = None
-        self._stop_flag = threading.Event()
-        self.mouse_listener = None
-        self.keyboard_listener = None
-
-        self.start_recording()
-
-    def start_recording(self):
-        if not HAS_PYNPUT:
-            QMessageBox.warning(self, '错误', 'pynput 未安装，无法录制宏。')
-            self.reject()
-            return
-
-        self.events.clear()
-        self.start_time = time.perf_counter()
-        self.recording = True
-
-        def on_move(x, y):
-            if not self.recording or self._stop_flag.is_set():
-                return False
-            self.events.append({
-                'type': 'move',
-                'x': x,
-                'y': y,
-                'time': time.perf_counter() - self.start_time,
-            })
-            return True
-
-        def on_click(x, y, button, pressed):
-            if not self.recording or self._stop_flag.is_set():
-                return False
-            self.events.append({
-                'type': 'click',
-                'x': x,
-                'y': y,
-                'button': button.name,
-                'pressed': pressed,
-                'time': time.perf_counter() - self.start_time,
-            })
-            return True
-
-        def on_scroll(x, y, dx, dy):
-            if not self.recording or self._stop_flag.is_set():
-                return False
-            self.events.append({
-                'type': 'scroll',
-                'x': x,
-                'y': y,
-                'dx': dx,
-                'dy': dy,
-                'time': time.perf_counter() - self.start_time,
-            })
-            return True
-
-        self.mouse_listener = MouseListener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
-        self.mouse_listener.start()
-
-        def on_press(key):
-            if key == Key.esc:
-                self.stop_recording()
-                return False
-            return True
-
-        self.keyboard_listener = KeyboardListener(on_press=on_press)
-        self.keyboard_listener.start()
-
-        self.label.setText('录制中... 按 ESC 或点击「停止录制」结束。')
-
-    def stop_recording(self):
-        if not self.recording:
-            return
-        self.recording = False
-        self._stop_flag.set()
-        if self.mouse_listener and self.mouse_listener.running:
-            self.mouse_listener.stop()
-        if self.keyboard_listener and self.keyboard_listener.running:
-            self.keyboard_listener.stop()
-        self.label.setText(f'录制完成，共 {len(self.events)} 个事件。')
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.setText('已停止')
-
-    def get_events(self):
-        return self.events
-
-    def closeEvent(self, event):
-        self.stop_recording()
-        event.accept()
-
-
 class TaijiLaunchButton(QWidget):
     """
     太极阴阳式启动 / 关闭控件：左（绿）＝一键启动，右（红）＝关闭全部。
@@ -522,9 +410,9 @@ class TaijiLaunchButton(QWidget):
     close_requested = pyqtSignal()
 
     # 每个半区三段色：高光 / 本色 / 暗部（偏沉稳的玉石绿与朱砂红，避免糖果色）
-    RUN_COLORS = ('#75C39B', '#2B815C', '#114835')
-    CLOSE_COLORS = ('#D98C7A', '#AB4132', '#5D1A12')
-    IDLE_COLORS = ('#E9E9E9', '#C8C8C8', '#9E9E9E')
+    RUN_COLORS = ('#A9ECC9', '#4CC38A', '#1D7350')
+    CLOSE_COLORS = ('#F2605A', '#C1121F', '#6B0710')
+    IDLE_COLORS = ('#EDEDED', '#CFCFCF', '#A6A6A6')
 
     def __init__(self, diameter=160, parent=None):
         super().__init__(parent)
@@ -639,7 +527,7 @@ class TaijiLaunchButton(QWidget):
     def _paint_shadow(self, p, big):
         p.save()
         p.setPen(Qt.NoPen)
-        for offset, spread, alpha in ((2, 0, 40), (5, 1, 28), (9, 2, 17), (13, 4, 9)):
+        for offset, spread, alpha in ((2, 0, 30), (5, 1, 20), (9, 2, 12), (13, 4, 6)):
             r = big.adjusted(-spread, -spread + offset, spread, spread + offset)
             p.setBrush(QColor(0, 0, 0, alpha))
             p.drawEllipse(r)
@@ -754,8 +642,8 @@ class TaijiLaunchButton(QWidget):
                              radius * 0.60, line_h)
                 # 浮雕字：先画右下暗影，再画亮面；禁用时改用深灰字，避免白字糊在浅灰上
                 if enabled:
-                    p.setPen(QColor(0, 0, 0, 95))
-                    p.drawText(box.translated(0.6, 1.1), Qt.AlignCenter, ch)
+                    p.setPen(QColor(0, 0, 0, 112))
+                    p.drawText(box.translated(0.6, 1.2), Qt.AlignCenter, ch)
                     p.setPen(QColor(255, 255, 255, 245))
                 else:
                     p.setPen(QColor(255, 255, 255, 130))
@@ -876,6 +764,121 @@ class TaijiLaunchButton(QWidget):
             else:
                 self.close_requested.emit()
 
+def pill_font(compact=False):
+    """胶囊按钮的字体：雅黑优先；小号用于预设行的小胶囊。"""
+    font = QFont()
+    font.setFamily('Microsoft YaHei UI')
+    font.setPixelSize(12 if compact else 15)
+    return font
+
+
+class PillButton(QPushButton):
+    """
+    象牙白 + 灰金的胶囊按钮。
+
+    宽度不写死：按文字实际宽度算出来，所以「日志」「设置」是短条、「添加文件夹」是长条——
+    这就是需求里"按字数给不同长度的圆角矩形条"。高度统一，圆角取一半，两端是完整半圆。
+
+    compact=True 用于预设行（新建 / 删除），尺寸更小但外观完全同源。
+    """
+
+    HEIGHT = 38
+    SIDE_PADDING = 18
+    MIN_WIDTH = 86
+
+    HEIGHT_COMPACT = 28
+    PADDING_COMPACT = 13
+    MIN_WIDTH_COMPACT = 58
+
+    # 浅色胶囊压在浅色面板上，靠"上沿亮边 + 下沿暗边 + 竖向渐变"做出压铸感，
+    # 不使用 QGraphicsDropShadowEffect——那会把整枚按钮先离屏渲染再模糊，文字会发虚。
+    _QSS = """
+    QPushButton {{
+        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #FFFFFF, stop:0.5 #FDFAF3, stop:1 #F1E9D9);
+        border: 1px solid #BEAD86;
+        border-top-color: #F2EAD8;
+        border-bottom-color: #AB9C77;
+        border-radius: {radius}px;
+        color: #383227;
+        padding: 0 1px;
+    }}
+    QPushButton:hover {{
+        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #FFFFFF, stop:0.5 #FCF8F0, stop:1 #F2EBDC);
+        border-color: #B0955C;
+        border-top-color: #F1E7D0;
+        color: #1C1810;
+    }}
+    QPushButton:pressed {{
+        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #E4D9C1, stop:1 #F3EDE0);
+        border-color: #99813F;
+        border-top-color: #C9B893;
+    }}
+    QPushButton:disabled {{
+        color: #A79E8B;
+        border-color: #DCD3BF;
+        background-color: #F2EDE3;
+    }}
+    """
+
+    def __init__(self, text, parent=None, compact=False):
+        super().__init__(text, parent)
+        self._compact = compact
+        self._height = self.HEIGHT_COMPACT if compact else self.HEIGHT
+        self._padding = self.PADDING_COMPACT if compact else self.SIDE_PADDING
+        self._min_width = self.MIN_WIDTH_COMPACT if compact else self.MIN_WIDTH
+
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(self._height)
+        self.setFont(pill_font(compact))
+        self.setStyleSheet(self._QSS.format(radius=self._height // 2))
+
+    def sizeHint(self):
+        metrics = self.fontMetrics()
+        width = metrics.horizontalAdvance(self.text()) + self._padding * 2
+        return QSize(max(self._min_width, width), self._height)
+
+
+class PillColumn(QWidget):
+    """
+    贴在圆一侧的胶囊列：三枚按钮按「中间那枚与圆心同高、上下两枚向外」摆放。
+
+    用绝对定位而不是 QVBoxLayout，因为布局只能平均分配剩余空间，
+    做不到"中间那枚严格对齐圆心"这条视觉规则。
+    align='right' 表示这一列在圆的左边（右边缘贴圆），'left' 反之。
+    """
+
+    CENTER_GAP = 66        # 中间那枚与上下两枚的中心距
+
+    def __init__(self, buttons, align, height, parent=None):
+        super().__init__(parent)
+        self._buttons = list(buttons)
+        self._align = align
+        for btn in self._buttons:
+            btn.setParent(self)
+        self.setFixedSize(self._ideal_width(), height)
+        self._relayout()
+
+    def _ideal_width(self):
+        return max(btn.sizeHint().width() for btn in self._buttons)
+
+    def _relayout(self):
+        center_y = self.height() / 2.0
+        offsets = (-self.CENTER_GAP, 0, self.CENTER_GAP)
+        for btn, dy in zip(self._buttons, offsets):
+            width = btn.sizeHint().width()
+            x = self.width() - width if self._align == 'right' else 0
+            btn.setGeometry(int(x),
+                            int(center_y + dy - btn.height() / 2.0),
+                            int(width), btn.height())
+
+    def resizeEvent(self, event):
+        self._relayout()
+        super().resizeEvent(event)
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -901,7 +904,6 @@ class LauncherWindow(QMainWindow):
         self.current_preset_name = ''
 
         self.launched_items = []
-        self.global_macro = []
         self.last_folder = ''          # 上次使用的文件夹，供选择框/手动输入定位
 
         # 某些程序的“关不掉”附加进程名（例如 Steam 中转的脚本）
@@ -918,11 +920,11 @@ class LauncherWindow(QMainWindow):
         self._stop_launch = False
 
         # 预设行
-        self.preset_label = QLabel('预设方案：')
+        self.preset_label = QLabel('预设方案')
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
-        self.btn_new_preset = QPushButton('➕ 新建')
-        self.btn_del_preset = QPushButton('❌ 删除')
+        self.btn_new_preset = PillButton('新建', compact=True)
+        self.btn_del_preset = PillButton('删除', compact=True)
 
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(self.preset_label)
@@ -935,49 +937,81 @@ class LauncherWindow(QMainWindow):
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.setDragDropMode(QAbstractItemView.DropOnly)
         self.list_widget.setDefaultDropAction(Qt.CopyAction)
+        self.list_widget.setStyleSheet("""
+            QListWidget {
+                background: #FFFFFF;
+                border: 1px solid #E2DACB;
+                border-radius: 12px;
+                padding: 6px;
+                color: #2E2A24;
+            }
+            QListWidget::item { padding: 6px 8px; border-radius: 8px; }
+            QListWidget::item:hover { background: #F7F2E7; }
+            QListWidget::item:selected { background: #EFE5CF; color: #221E17; }
+        """)
 
-        # 添加 / 删除（第一行）
-        self.btn_add = QPushButton('📂 添加程序')
-        self.btn_add_folder = QPushButton('📁 添加文件夹')
-        self.btn_add_path = QPushButton('✏ 输入路径')
-        self.btn_del = QPushButton('🗑 删除选中')
+        # 六项操作做成胶囊条，挂在圆的左右两侧——中间只留一颗圆，不与按钮堆在一起。
+        # 文字不用 emoji：彩色图标会破坏象牙白 + 灰金的整体质感。
+        self.btn_add = PillButton('添加程序')
+        self.btn_add_folder = PillButton('添加文件夹')
+        self.btn_add_path = PillButton('输入路径')
+        self.btn_del = PillButton('删除选中')
+        self.btn_log = PillButton('日志')
+        self.btn_settings = PillButton('设置')
 
-        add_layout = QHBoxLayout()
-        for b in (self.btn_add, self.btn_add_folder, self.btn_add_path, self.btn_del):
-            add_layout.addWidget(b, 1)
-
-        # 太极式启动 / 关闭：单独占据顶部区域，不与其它功能按钮混排
+        # 顺序即位置：第 1 个在上、第 3 个在下，中间那枚与圆心同高。
+        # 左列「添加文件夹」5 字最长放上端；两个 4 字并列时把最常用的「添加程序」
+        # 放中间（离圆心最近、最好点），「输入路径」放下面。
+        # 右列「删除选中」4 字在上，两个 2 字短条（日志 / 设置）占中间与下方。
         self.taiji = TaijiLaunchButton(160)
+        pills_height = self.taiji.height()
+        self.left_pills = PillColumn(
+            [self.btn_add_folder, self.btn_add, self.btn_add_path], 'right', pills_height)
+        self.right_pills = PillColumn(
+            [self.btn_del, self.btn_log, self.btn_settings], 'left', pills_height)
 
         taiji_row = QHBoxLayout()
+        taiji_row.setSpacing(12)
         taiji_row.addStretch(1)
+        taiji_row.addWidget(self.left_pills)
         taiji_row.addWidget(self.taiji)
+        taiji_row.addWidget(self.right_pills)
         taiji_row.addStretch(1)
 
-        # 全局宏按钮
-        self.btn_record_global = QPushButton('🎬 录制总宏')
-        self.btn_play_global = QPushButton('▶ 播放总宏')
-        self.btn_clear_global = QPushButton('🗑 清除总宏')
-
-        macro_layout = QHBoxLayout()
-        macro_layout.addWidget(self.btn_record_global)
-        macro_layout.addWidget(self.btn_play_global)
-        macro_layout.addWidget(self.btn_clear_global)
-        macro_layout.addStretch()
-        self.btn_log = QPushButton('🗒 日志')
-        macro_layout.addWidget(self.btn_log)
-
-        # 布局
+        # 布局：预设行在最上（全局上下文），圆区居次（主视觉），列表吃满剩余高度
         central = QWidget()
+        central.setObjectName('panel')
         self.setCentralWidget(central)
+
+        # 三层明度拉出层次：暖白面板（最深）→ 象牙白胶囊（中间调）→ 纯白列表（最亮）
+        self.preset_label.setObjectName('presetLabel')
+        self.setStyleSheet("""
+            #panel { background-color: #EDE7DB; }
+            QLabel#presetLabel { color: #4C463A; }
+            QComboBox {
+                background: #FFFDF8;
+                border: 1px solid #D6CBB2;
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: #35302A;
+            }
+            QComboBox:hover { border-color: #B0955C; }
+            QComboBox::drop-down { border: none; width: 20px; }
+            QComboBox QAbstractItemView {
+                background: #FFFDF8;
+                border: 1px solid #D6CBB2;
+                selection-background-color: #EFE6D2;
+                selection-color: #221E17;
+                outline: none;
+            }
+        """)
+
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(10)
-        layout.addLayout(taiji_row)
         layout.addLayout(preset_layout)
-        layout.addWidget(self.list_widget)
-        layout.addLayout(add_layout)
-        layout.addLayout(macro_layout)
+        layout.addLayout(taiji_row)
+        layout.addWidget(self.list_widget, 1)
 
         # 填充预设下拉框
         self.preset_combo.addItems(self.presets.keys())
@@ -1006,10 +1040,8 @@ class LauncherWindow(QMainWindow):
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.taiji.close_requested.connect(self.close_all_programs)
 
-        self.btn_record_global.clicked.connect(self.record_global_macro)
-        self.btn_play_global.clicked.connect(self.play_global_macro)
-        self.btn_clear_global.clicked.connect(self.clear_global_macro)
         self.btn_log.clicked.connect(self.open_log_dir)
+        self.btn_settings.clicked.connect(self.open_settings)
 
         # 说明：不在此处做任何自动启动。启动器打开时只呈现界面，
         # 必须由用户点击「🚀 一键启动」才会运行列表内的条目。
@@ -1046,67 +1078,6 @@ class LauncherWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, '启动失败', str(e))
 
-
-    def record_global_macro(self):
-        if not HAS_PYNPUT:
-            QMessageBox.warning(self, '无法录制', '请先安装 pynput (pip install pynput)')
-            return
-        dlg = MacroRecorderDialog(self)
-        if dlg.exec_() == QDialog.Accepted or dlg.get_events():
-            self.global_macro = dlg.get_events()
-            QMessageBox.information(self, '成功', f'全局宏已保存，共 {len(self.global_macro)} 个事件。')
-            self.save_config()
-        else:
-            QMessageBox.information(self, '取消', '未录制任何事件。')
-
-    def clear_global_macro(self):
-        if self.global_macro:
-            reply = QMessageBox.question(self, '清除宏', '确定要清除当前全局宏吗？',
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.global_macro = []
-                self.save_config()
-                QMessageBox.information(self, '已清除', '全局宏已清除。')
-        else:
-            QMessageBox.information(self, '提示', '当前没有全局宏。')
-
-    def play_global_macro(self):
-        if not self.global_macro:
-            QMessageBox.information(self, '提示', '当前没有全局宏。')
-            return
-        if not (HAS_PYNPUT and HAS_WIN32GUI):
-            QMessageBox.warning(self, '错误', 'pynput 或 pywin32 缺失，无法播放宏。')
-            return
-        def run():
-            self._play_macro(self.global_macro)
-
-        threading.Thread(target=run, daemon=True).start()
-    def _play_macro(self, macro):
-        """实际播放宏的函数（内部使用）"""
-        if not macro or not HAS_PYNPUT:
-            return
-        controller = MouseController()
-        last_time = 0.0
-        for event in macro:
-            t = event.get('time', 0)
-            delta = t - last_time
-            if delta > 0:
-                time.sleep(delta)
-            last_time = t
-            etype = event['type']
-            if etype == 'move':
-                controller.position = (event['x'], event['y'])
-            elif etype == 'click':
-                button_map = {'left': Button.left, 'right': Button.right, 'middle': Button.middle}
-                btn = button_map.get(event['button'])
-                if not btn:
-                    continue
-                if event['pressed']:
-                    controller.press(btn)
-                else:
-                    controller.release(btn)
-            elif etype == 'scroll':
-                controller.scroll(event['dx'], event['dy'])
 
     def save_current_list_to_preset(self):
         if not self.current_preset_name:
@@ -1342,18 +1313,8 @@ class LauncherWindow(QMainWindow):
                 except Exception:
                     log.exception('打开文件夹失败：%s', folder)
 
-            # 启动完成后自动播放全局宏
-            if not self._stop_launch and self.global_macro and HAS_PYNPUT and HAS_WIN32GUI:
-                time.sleep(2)
-                QTimer.singleShot(0, self._auto_play_global_macro)
         finally:
             QTimer.singleShot(0, self._launch_finished)
-    def _auto_play_global_macro(self):
-        if self.global_macro:
-            def run():
-                self._play_macro(self.global_macro)
-
-            threading.Thread(target=run, daemon=True).start()
     def _launch_finished(self):
         self._launching = False
         self.taiji.set_run_enabled(True)
@@ -1886,6 +1847,20 @@ class LauncherWindow(QMainWindow):
         log.info('提权关闭结束，剩余仍在运行：%s', remaining)
         return not remaining
 
+    def open_settings(self):
+        """
+        设置入口（占位，未实现功能）。
+
+        按需求先留出按钮与调用路径，本版点击只说明"尚未实现"，
+        不做任何副作用——以后接设置面板时只改这个方法体即可。
+        """
+        log.info('用户点击「设置」（本版尚未实现）')
+        QMessageBox.information(
+            self, '设置',
+            '设置面板尚未实现。\n\n'
+            '这个入口本版只是预留位置，点击不会修改任何配置。')
+
+
     def open_log_dir(self):
         """打开日志所在目录，方便用户查看失败原因。"""
         try:
@@ -1925,7 +1900,6 @@ class LauncherWindow(QMainWindow):
             'settings': {
                 'last_folder': self.last_folder,
             },
-            'global_macro': self.global_macro,
         }
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -1936,7 +1910,6 @@ class LauncherWindow(QMainWindow):
         if not os.path.exists(CONFIG_FILE):
             self.presets = {'默认方案': []}
             self.current_preset_name = '默认方案'
-            self.global_macro = []
             self.last_folder = ''
             return
         try:
@@ -1963,12 +1936,10 @@ class LauncherWindow(QMainWindow):
                 self.last_folder = normalize_input_path(settings.get('last_folder', ''))
             else:
                 self.last_folder = ''
-            self.global_macro = data.get('global_macro', [])
         except Exception as e:
             QMessageBox.warning(self, '加载失败', f'配置文件读取失败：\n{e}\n将使用默认设置。')
             self.presets = {'默认方案': []}
             self.current_preset_name = '默认方案'
-            self.global_macro = []
             self.last_folder = ''
 
     def closeEvent(self, event):
@@ -1979,6 +1950,6 @@ class LauncherWindow(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = LauncherWindow()
-    window.resize(520, 680)
+    window.resize(560, 700)
     window.show()
     sys.exit(app.exec_())
