@@ -13,6 +13,10 @@
   - 发布资产统一为 `LaunchForge_vX.Y.Z.exe`（ASCII）；GitHub Actions 会丢失非 ASCII 文件名字符
   - Release 正文追加「下载与使用」固定说明块
 - `scripts/build.bat` 改为从 `APP_VERSION` 读版本号，产物同时落到 `dist/` 与仓库根
+- 构建后自动重建桌面快捷方式（`scripts/update_shortcut.py`）并清理旧版本 exe：
+  `.lnk` 存的是绝对路径，版本号一变就会失效，此前需要手工改
+- 本地产物改用 ASCII 名 `LaunchForge_vX.Y.Z.exe`（与 Release 资产一致），
+  避免 `.bat` 在非 UTF-8 代码页下的解析问题
 - 清理历史 exe 与 `.spec`：仓库根只保留当前可用版本，原始程序移入 `reference/`（已 gitignore）
 
 ---

@@ -24,10 +24,7 @@
 ## 下载
 
 前往 [Releases](https://github.com/weijianluo114-ux/Start_All/releases) 下载最新的
-`LaunchForge_vX.Y.Z.exe`（CI 构建产物），双击即可运行，无需安装 Python 或依赖。
-
-> 本地用 `scripts\build.bat` 构建时产物名为 `一键多启_vX.Y.Z.exe`，两者内容一致，
-> 只是发布资产使用 ASCII 文件名（GitHub Actions 处理非 ASCII 文件名会丢字符）。
+`LaunchForge_vX.Y.Z.exe`，双击即可运行，无需安装 Python 或依赖。
 
 - 配置与日志目录：`%LOCALAPPDATA%\MultiLauncher`
 - 完全重置：删除该目录即可
@@ -76,8 +73,11 @@ python src/launchforge.py
 scripts\build.bat
 ```
 
-脚本会从 `src\launchforge.py` 读取 `APP_VERSION`，产出 `dist\一键多启_vX.Y.Z.exe`，
-并复制一份到仓库根目录作为当前可用测试版。
+脚本会从 `src\launchforge.py` 读取 `APP_VERSION`，产出 `dist\LaunchForge_vX.Y.Z.exe`，
+复制一份到仓库根目录作为当前可用测试版，并**自动重建桌面快捷方式**、清理旧版本 exe。
+
+> 快捷方式（`.lnk`）存的是带版本号的绝对路径，因此版本一变就必须重建；
+> `build.bat` 已通过 `scripts/update_shortcut.py` 自动完成，无需手工改。
 
 等价的命令行：
 
@@ -86,7 +86,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name 一键多启_v1.6.1 ^
+    --name LaunchForge_v1.6.1 ^
     src\launchforge.py
 ```
 
