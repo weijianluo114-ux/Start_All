@@ -77,4 +77,15 @@ jobs:
         with:
           files: dist/*.exe
           generate_release_notes: true
+          append_body: |
+            ## 下载与使用
+
+            1. 下载下方 `LaunchForge_vX.Y.Z.exe`；
+            2. 放到任意目录双击运行，无需安装；
+            3. 配置与日志在 `%LOCALAPPDATA%\MultiLauncher`（删除该目录即可重置）。
+
+            详细说明见 [README](https://github.com/weijianluo114-ux/Start_All#readme)，
+            变更记录见 [CHANGELOG](https://github.com/weijianluo114-ux/Start_All/blob/main/CHANGELOG.md)。
+
+            > 未做代码签名，首次运行若出现 SmartScreen 提示，选择“更多信息 → 仍要运行”。
           fail_on_unmatched_files: true
