@@ -61,7 +61,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.6.1'
+APP_VERSION = '1.7.0'
 
 log = logging.getLogger('launchforge')
 
@@ -318,6 +318,79 @@ def launch_program(path):
     return None
 
 
+# ------------------------- 资源管理器窗口 -------------------------
+#
+# 关闭文件夹条目的本质是"关闭承载它的窗口"，Windows 没有"关闭某个文件夹"的接口。
+# 实测结论（Windows 11，见 docs/04-问题/Q-003）：
+#   1. Shell.Application.Windows() 会把标签页逐条列出，同一窗口的多个标签共享同一个 HWND；
+#   2. 每个条目可用 Document.Folder.Self.Path 取到该标签的路径，后台标签也能取到；
+#   3. 多标签窗口下 Quit() 无效，WM_CLOSE 只关闭"当前活动标签"，连发才能整窗关闭。
+# 因此实现路线是：按 HWND 分组 → 用路径判定该窗口的标签是否**全部**属于列表条目 → 整窗关闭。
+# 之所以不在打开时记录 HWND：用户把窗口拖进另一窗口合并成标签后，原 HWND 会消失，记录必然失效。
+
+def _norm_fs_path(path):
+    """路径归一化，用于与资源管理器窗口的路径比对。"""
+    if not path:
+        return ''
+    p = str(path)
+    if p.startswith('::'):
+        return p.lower()               # 虚拟位置（主文件夹 / 此电脑），不参与匹配
+    try:
+        p = os.path.normpath(p)
+    except Exception:
+        return p.lower()
+    return os.path.normcase(p)
+
+
+def list_explorer_windows():
+    """
+    枚举资源管理器窗口。
+
+    返回 [{'hwnd': int, 'title': str, 'paths': [路径, ...]}]，
+    同一窗口的多个标签合并到同一条的 paths 中（顺序即系统给出的顺序）。
+    非资源管理器窗口按窗口类名过滤；缺少 pywin32 时返回空列表。
+    """
+    if sys.platform != 'win32' or not HAS_WIN32 or not HAS_WIN32GUI:
+        return []
+
+    try:
+        wins = Dispatch('Shell.Application').Windows()
+    except Exception:
+        log.exception('枚举资源管理器窗口失败')
+        return []
+
+    grouped, order = {}, []
+    for i in range(wins.Count):
+        try:
+            w = wins.Item(i)
+            hwnd = int(w.HWND)
+        except Exception:
+            continue
+        try:
+            if win32gui.GetClassName(hwnd) != 'CabinetWClass':
+                continue
+        except Exception:
+            continue
+        try:
+            path = w.Document.Folder.Self.Path
+        except Exception:
+            path = ''
+        if hwnd not in grouped:
+            grouped[hwnd] = {'hwnd': hwnd, 'title': '', 'paths': []}
+            order.append(hwnd)
+        grouped[hwnd]['paths'].append(path or '')
+
+    result = []
+    for hwnd in order:
+        entry = grouped[hwnd]
+        try:
+            entry['title'] = win32gui.GetWindowText(hwnd)
+        except Exception:
+            entry['title'] = ''
+        result.append(entry)
+    return result
+
+
 class MacroRecorderDialog(QDialog):
     """录制鼠标宏的对话框（用于全局宏）"""
 
@@ -498,7 +571,8 @@ class LauncherWindow(QMainWindow):
 
         # 启动 / 关闭（第二行）
         self.btn_run = QPushButton('🚀 一键启动')
-        self.btn_kill_all = QPushButton('⏹ 关闭所有程序')
+        self.btn_kill_all = QPushButton('⏹ 关闭全部')
+        self.btn_kill_all.setToolTip('关闭列表内正在运行的程序，并关闭列表内文件夹对应的资源管理器窗口')
 
         run_layout = QHBoxLayout()
         run_layout.addWidget(self.btn_run, 2)
@@ -1001,12 +1075,106 @@ class LauncherWindow(QMainWindow):
                 return pending
             time.sleep(0.25)
 
+    @staticmethod
+    def _window_label(win_info):
+        """窗口的可读标识：单标签取文件夹名，多标签额外标注标签数。"""
+        paths = [p for p in (win_info.get('paths') or []) if p]
+        names = []
+        for p in paths[:3]:
+            name = os.path.basename(str(p).rstrip('\\/'))
+            names.append(name or str(p))
+        label = '、'.join(names)
+        if len(paths) > 3:
+            label += ' 等'
+        if len(paths) > 1:
+            label += '（%d 个标签）' % len(paths)
+        return label or ('窗口 %s' % win_info.get('hwnd'))
+
+    def _folder_window_plan(self, folder_paths):
+        """
+        把列表中的文件夹条目对应到资源管理器窗口。
+
+        返回 (closable, mixed)：
+          closable —— 窗口内所有标签都属于列表条目，可直接整窗关闭
+          mixed    —— 混有列表外的标签，整窗关闭会连带关掉别的标签，需用户确认
+        只按"路径"判定，不依赖打开时记录的 HWND：用户把窗口拖进另一窗口合并成标签后，
+        原 HWND 会消失，任何基于 HWND 的记录都会失效。
+        """
+        targets = {_norm_fs_path(p) for p in folder_paths if p}
+        closable, mixed = [], []
+        if not targets:
+            return closable, mixed
+        for win_info in list_explorer_windows():
+            hits, foreign = [], []
+            for p in win_info['paths']:
+                np = _norm_fs_path(p)
+                if np and np in targets:
+                    hits.append(p)
+                else:
+                    foreign.append(p)
+            if not hits:
+                continue
+            item = dict(win_info)
+            if foreign:
+                item['foreign'] = foreign
+                mixed.append(item)
+            else:
+                closable.append(item)
+        return closable, mixed
+
+    def _close_folder_window(self, win_info):
+        """
+        整窗关闭一个资源管理器窗口，返回 (是否关闭, 说明)。
+
+        多标签窗口不能一次关掉：实测 WM_CLOSE 只关闭"当前活动标签"，
+        每关掉一个标签窗口就少一条记录，因此按标签数循环发送并复查；
+        单标签窗口一次即可整窗消失。Quit() 在多标签场景下实测无效，故不使用。
+        """
+        if not HAS_WIN32GUI:
+            return False, '缺少 pywin32，无法关闭窗口'
+        hwnd = win_info.get('hwnd')
+        if not hwnd:
+            return False, '没有窗口句柄'
+
+        tabs = max(1, len(win_info.get('paths') or []))
+        deadline = time.time() + 3.0 + 0.8 * tabs
+        attempts = 0
+        last_remaining = tabs
+        while time.time() < deadline:
+            try:
+                if not win32gui.IsWindow(hwnd):
+                    return True, 'attempts=%d' % attempts
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception as e:
+                return False, '发送关闭消息异常：%s' % e
+            attempts += 1
+            time.sleep(0.3)
+            try:
+                alive = bool(win32gui.IsWindow(hwnd))
+                remaining = sum(1 for w in list_explorer_windows() if w['hwnd'] == hwnd)
+            except Exception:
+                alive, remaining = True, last_remaining
+            if not alive or remaining == 0:
+                return True, 'attempts=%d' % attempts
+            if remaining >= last_remaining and attempts >= 2:
+                # 连续两次标签数没有减少，说明关不动（被拦截或无响应），不再空转
+                return False, 'attempts=%d remaining=%d' % (attempts, remaining)
+            last_remaining = remaining
+
+        try:
+            return (not win32gui.IsWindow(hwnd)), 'attempts=%d remaining=%d' % (attempts, last_remaining)
+        except Exception:
+            return False, 'attempts=%d 复查失败' % attempts
+
     def close_all_programs(self):
         """
-        关闭列表内所有正在运行的程序。
+        关闭列表内的程序与文件夹窗口。
 
-        流程：确认 → 检测运行状态（未运行/无法判定的跳过）→ 逐项关闭 → 汇总。
-        与旧版的区别：不再只处理本次会话启动的进程，也不再关闭启动器自身。
+        流程：确认 → 检测运行状态/窗口状态（未运行、找不到窗口的跳过）→ 逐项关闭 → 汇总。
+        与旧版的区别：
+          · 不再只处理本次会话启动的进程，也不再关闭启动器自身；
+          · 文件夹条目改为关闭其资源管理器窗口（整窗关闭，不结束 explorer.exe）；
+          · 窗口内混有列表外标签时单独询问，用户拒绝则跳过，绝不擅自连带关闭。
         """
         paths = []
         for i in range(self.list_widget.count()):
@@ -1018,15 +1186,14 @@ class LauncherWindow(QMainWindow):
             QMessageBox.information(self, '提示', '列表为空，没有需要关闭的程序。')
             return
 
-        # 文件夹不参与关闭（打开的是资源管理器窗口，不该被杀进程）
+        # 文件夹条目单独处理：它们是"窗口"，不是"进程"
+        folder_paths = [p for p in paths if os.path.isdir(p)]
         program_paths = [p for p in paths if not os.path.isdir(p)]
-        if not program_paths:
-            QMessageBox.information(self, '提示', '列表中只有文件夹，没有需要关闭的程序。')
-            return
 
         proc_map = self._get_process_map()
         own_name = os.path.basename(sys.executable).lower() if getattr(sys, 'frozen', False) else None
-        log.info('关闭检查开始：列表 %d 项，进程快照 %d 种镜像', len(program_paths), len(proc_map))
+        log.info('关闭检查开始：列表 %d 项（程序 %d / 文件夹 %d），进程快照 %d 种镜像',
+                 len(paths), len(program_paths), len(folder_paths), len(proc_map))
 
         running = []      # [(path, image)]
         skipped = []      # [(path, reason)]
@@ -1057,23 +1224,51 @@ class LauncherWindow(QMainWindow):
             else:
                 skipped.append((path, '未运行'))
 
-        log.info('判定结果：运行中 %d 项 %s；跳过 %d 项 %s',
+        closable, mixed = self._folder_window_plan(folder_paths)
+
+        log.info('判定结果：运行中程序 %d 项 %s；可整窗关闭的窗口 %d 个 %s；混有列表外标签 %d 个 %s；程序跳过 %d 项'
+                 ' %s',
                  len(running), [os.path.basename(p) for p, _ in running],
+                 len(closable), [self._window_label(w) for w in closable],
+                 len(mixed), [self._window_label(w) for w in mixed],
                  len(skipped), [(os.path.basename(p), r) for p, r in skipped])
 
-        if not running:
+        if not running and not closable and not mixed:
             QMessageBox.information(
                 self, '无需关闭',
-                '列表中的程序当前都没有在运行，已全部跳过。\n\n共检查 %d 项。' % len(program_paths))
+                '列表中的程序当前都没有在运行，也没有找到对应的文件夹窗口，已全部跳过。\n\n'
+                '共检查 %d 个程序、%d 个文件夹。' % (len(program_paths), len(folder_paths)))
             return
 
-        names = [get_display_name(p) for p, _ in running]
-        detail = '\n'.join('· ' + n for n in names[:12])
-        if len(names) > 12:
-            detail += '\n· …等共 %d 个' % len(names)
-        text = '以下 %d 个程序正在运行，确定全部关闭吗？\n\n%s' % (len(running), detail)
+        # 列表里有、但当前没打开的文件夹（用于结果说明，不参与关闭）
+        matched = set()
+        for w in closable + mixed:
+            for p in w['paths']:
+                np = _norm_fs_path(p)
+                if np:
+                    matched.add(np)
+        unopened = [p for p in folder_paths if _norm_fs_path(p) not in matched]
+
+        sections = []
+        if running:
+            names = [get_display_name(p) for p, _ in running]
+            detail = '\n'.join('· ' + n for n in names[:12])
+            if len(names) > 12:
+                detail += '\n· …等共 %d 个' % len(names)
+            sections.append('程序 %d 个（正在运行）：\n%s' % (len(running), detail))
+        if closable:
+            labels = ['· ' + self._window_label(w) for w in closable[:8]]
+            if len(closable) > 8:
+                labels.append('· …等共 %d 个窗口' % len(closable))
+            sections.append('文件夹窗口 %d 个（整窗关闭）：\n%s' % (len(closable), '\n'.join(labels)))
+
+        text = '以下内容将被关闭：\n\n' + '\n\n'.join(sections)
+        if mixed:
+            text += '\n\n另有 %d 个文件夹窗口混有列表外的标签，稍后单独询问。' % len(mixed)
         if skipped:
             text += '\n\n另有 %d 项未运行或无法判定，将自动跳过。' % len(skipped)
+        if unopened:
+            text += '\n其中 %d 个文件夹当前没有打开的窗口，自然跳过。' % len(unopened)
         text += '\n\n关闭后不可恢复，请确认已保存工作。'
 
         reply = QMessageBox.question(self, '确认关闭', text,
@@ -1081,6 +1276,35 @@ class LauncherWindow(QMainWindow):
                                      QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
+
+        # 混有列表外标签的窗口：逐一询问太吵，一次列清，同意则整窗关闭，不同意则整体跳过
+        close_mixed = []
+        skipped_windows = []
+        if mixed:
+            lines = []
+            for w in mixed[:8]:
+                foreign = [os.path.basename(str(p).rstrip('\\/')) or str(p)
+                           for p in w.get('foreign', []) if p]
+                shown = '、'.join(foreign[:3]) + ('…' if len(foreign) > 3 else '')
+                lines.append('· %s，另有 %d 个标签：%s' % (self._window_label(w), len(foreign), shown))
+            if len(mixed) > 8:
+                lines.append('· …等共 %d 个窗口' % len(mixed))
+
+            reply2 = QMessageBox.question(
+                self, '窗口含其他标签',
+                '以下 %d 个文件夹窗口里还有不属于本列表的标签：\n\n%s\n\n'
+                '整窗关闭会把这些标签一起关掉（它们的文件不会被删除）。\n'
+                '是否一并关闭？\n\n'
+                '「是」= 整窗关闭；「否」= 跳过这些窗口，其余内容照常关闭。'
+                % (len(mixed), '\n'.join(lines)),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No)
+            if reply2 == QMessageBox.Yes:
+                close_mixed = mixed
+            else:
+                skipped_windows = [(self._window_label(w), '含列表外标签，按你的选择跳过')
+                                   for w in mixed]
+                log.info('用户选择跳过混合标签窗口 %d 个', len(mixed))
 
         # 先中止可能仍在进行的启动流程，避免"一边启动一边关闭"
         self._stop_launch = True
@@ -1121,19 +1345,43 @@ class LauncherWindow(QMainWindow):
             else:
                 closed += 1
 
+        # 关闭文件夹窗口（整窗；多标签窗口由 _close_folder_window 循环处理）
+        win_closed, win_failed = 0, []
+        for w in (closable + close_mixed):
+            ok, note = self._close_folder_window(w)
+            if ok:
+                win_closed += 1
+                log.info('文件夹窗口已关闭：%s | tabs=%s | %s',
+                         self._window_label(w), len(w.get('paths') or []), note)
+            else:
+                win_failed.append((self._window_label(w), '窗口未关闭（可能被拦截或无响应）'))
+                log.warning('文件夹窗口关闭失败：%s | hwnd=%s | %s',
+                            self._window_label(w), w.get('hwnd'), note)
+
         self.launched_items.clear()
         self.save_config()
 
-        msg = '已关闭 %d 个程序。' % closed
-        if skipped:
-            msg += '\n跳过 %d 项（未运行 / 无法判定）。' % len(skipped)
-        if failed:
+        msg_parts = []
+        if running:
+            msg_parts.append('已关闭 %d 个程序。' % closed)
+        if closable or close_mixed:
+            msg_parts.append('已关闭 %d 个文件夹窗口。' % win_closed)
+        msg = '\n'.join(msg_parts) if msg_parts else '没有内容被关闭。'
+
+        skip_total = len(skipped) + len(skipped_windows) + len(unopened)
+        if skip_total:
+            msg += '\n跳过 %d 项（未运行 / 未打开窗口 / 无法判定 / 按你的选择跳过）。' % skip_total
+
+        all_failed = failed + win_failed
+        if all_failed:
             msg += '\n\n关闭失败 %d 项：\n%s' % (
-                len(failed),
-                '\n'.join('· %s —— %s' % (n, r) for n, r in failed[:8]))
+                len(all_failed),
+                '\n'.join('· %s —— %s' % (n, r) for n, r in all_failed[:8]))
             msg += '\n\n详细命令与返回码已写入日志：\n%s' % LOG_FILE
             msg += '\n（可点击主界面「🗒 日志」打开所在目录）'
-        log.info('关闭结束：成功 %d，失败 %d，跳过 %d', closed, len(failed), len(skipped))
+
+        log.info('关闭结束：程序成功 %d / 失败 %d；文件夹窗口成功 %d / 失败 %d；跳过 %d',
+                 closed, len(failed), win_closed, len(win_failed), skip_total)
         QMessageBox.information(self, '关闭结果', msg)
 
     @staticmethod

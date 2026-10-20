@@ -11,7 +11,7 @@
   6. 持久化：重启后条目与「上次使用的文件夹」都能恢复
   7. 启动：文件夹用系统方式打开，且返回 None（不产生待关闭进程）
   8. 一键启动：失效条目被跳过，其余照常
-  9. 关闭所有程序：文件夹被排除；只有文件夹时提示而不杀进程
+  9. 关闭全部：文件夹按窗口处理，未打开窗口时提示「无需关闭」且不弹确认框
  10. 双击失效条目：只提示，不执行启动
 
 运行环境：PyQt5 + offscreen，配置目录指向临时沙箱，不触碰真实配置。
@@ -229,16 +229,18 @@ assert os.path.normpath(FOLDER) in launched, "文件夹应由资源管理器打�
 assert os.path.normpath(os.path.join(FOLDER, "子目录")) in launched
 assert not hasattr(win2, "_folder_window"), "自建标签窗口已回退，不应存在"
 
-# ---------- 9. 关闭所有程序不碰文件夹 ----------
+# ---------- 9. 文件夹条目参与"关闭全部"（v1.7.0 起按窗口关闭） ----------
+# 该临时文件夹从未真正打开过窗口 → 应提示"没有找到对应的文件夹窗口"，且不弹确认框
 win3 = launchforge.LauncherWindow()
 win3.list_widget.clear()
 win3.add_to_list(FOLDER)
 FakeMessageBox.calls.clear()
 win3.close_all_programs()
 titles = [c[1] for c in FakeMessageBox.calls]
-print("[9] 仅文件夹时点击关闭 → 弹窗 %s" % titles)
-assert "只有文件夹" in "".join(c[2] for c in FakeMessageBox.calls)
-assert "确认关闭" not in titles, "文件夹不该触发关闭确认"
+print("[9] 仅文件夹且未打开窗口时点击关闭 → 弹窗 %s" % titles)
+assert "无需关闭" in titles
+assert "没有找到对应的文件夹窗口" in "".join(c[2] for c in FakeMessageBox.calls)
+assert "确认关闭" not in titles, "没有可关闭的窗口时不该弹确认框"
 
 # ---------- 10. 双击失效条目 ----------
 calls = []
