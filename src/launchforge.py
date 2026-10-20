@@ -60,7 +60,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.9.0'
+APP_VERSION = '1.9.1'
 
 log = logging.getLogger('launchforge')
 
@@ -238,7 +238,7 @@ def entry_tooltip(path):
 
 
 class ShellProc:
-    """模拟 subprocess.Popen 对象，用于 WScript.Shell.Run 启动的进程"""
+    """模拟 subprocess.Popen 对象，用于 ShellExecuteEx / WScript.Shell 启动的进程"""
     def __init__(self, pid, target):
         self.pid = pid
         self.target = target
@@ -252,6 +252,196 @@ class ShellProc:
                            capture_output=True, timeout=5, **hidden_subprocess_kwargs())
         except Exception:
             return None
+
+
+# ------------------------- 文件关联与进程定位 -------------------------
+#
+# 背景（BUG-005）：`.drawio` / `.md` / `.docx` 这类"文档条目"自身没有进程镜像名。
+# 旧实现有两个断点：
+#   1. 启动走 WScript.Shell.Run，实测它对"文件关联"返回 0，拿不到 PID；
+#   2. 关闭时 _close_targets 只认 .exe/.com，文档条目一律 image=None。
+# 两者叠加 → 运行状态判不出来，整条被跳过（日志：脚本类且非本次启动，无法判定）。
+# 修法：打开时用 ShellExecuteEx 取真实 PID；关闭时先按"命令行包含该文件路径"精确定位，
+# 再用文件关联解析出的宿主程序名兜底。
+
+class SHELLEXECUTEINFOW(ctypes.Structure):
+    """ShellExecuteExW 的参数结构（只用到前几个字段，hProcess 是最后一项）。"""
+    _fields_ = [
+        ('cbSize', ctypes.c_ulong),
+        ('fMask', ctypes.c_ulong),
+        ('hwnd', ctypes.c_void_p),
+        ('lpVerb', ctypes.c_wchar_p),
+        ('lpFile', ctypes.c_wchar_p),
+        ('lpParameters', ctypes.c_wchar_p),
+        ('lpDirectory', ctypes.c_wchar_p),
+        ('nShow', ctypes.c_int),
+        ('hInstApp', ctypes.c_void_p),
+        ('lpIDList', ctypes.c_void_p),
+        ('lpClass', ctypes.c_wchar_p),
+        ('hkeyClass', ctypes.c_void_p),
+        ('dwHotKey', ctypes.c_ulong),
+        ('hIcon', ctypes.c_void_p),
+        ('hProcess', ctypes.c_void_p),
+    ]
+
+
+def open_via_shell(path):
+    """
+    用 ShellExecuteEx 打开文件（走系统关联），返回进程 PID；失败返回 0。
+
+    为什么不用 WScript.Shell.Run：实测它对文档关联返回 0（成功但无 PID），
+    于是启动记录里没有这一项，关闭时无从判定。
+    """
+    if sys.platform != 'win32':
+        return 0
+    try:
+        sei = SHELLEXECUTEINFOW()
+        sei.cbSize = ctypes.sizeof(sei)
+        # SEE_MASK_NOCLOSEPROCESS(0x40) 拿进程句柄
+        # SEE_MASK_NOASYNC(0x100) 保证返回时进程已创建
+        # SEE_MASK_FLAG_NO_UI(0x400) 出错时不弹系统错误框
+        sei.fMask = 0x00000040 | 0x00000100 | 0x00000400
+        sei.lpVerb = 'open'
+        sei.lpFile = path
+        sei.nShow = 1
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+            log.warning('ShellExecuteEx 失败：%s（错误码 %s）', path, ctypes.get_last_error())
+            return 0
+        if not sei.hProcess:
+            return 0
+        pid = int(ctypes.windll.kernel32.GetProcessId(sei.hProcess))
+        ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+        return pid
+    except Exception:
+        log.exception('ShellExecuteEx 调用异常：%s', path)
+        return 0
+
+
+# 这些是系统的"兜底宿主"，不是用户真正用来打开文档的程序。
+# 典型：没有默认程序时 AssocQueryString 会给出 OpenWith.exe（"打开方式"对话框的宿主），
+# 若把它当成关联程序，关闭时会误判为"已运行"甚至去关系统对话框。
+SHELL_WRAPPER_IMAGES = {
+    'openwith.exe',
+    'applicationframehost.exe',
+    'dllhost.exe',
+    'explorer.exe',
+    'launchwinapp.exe',
+    'dllhost.exe',
+}
+
+
+def assoc_executable(path):
+    """
+    返回"打开该文件时系统会调用的程序"的完整路径；解析不到返回 ''。
+
+    `.drawio` → `...\\draw.io\\draw.io.exe`。关闭文档条目时用它作为兜底的镜像名。
+    系统兜底宿主（OpenWith.exe 等）会被过滤成空——它不代表一个真实的应用。
+    """
+    if sys.platform != 'win32':
+        return ''
+    ext = os.path.splitext(str(path))[1]
+    if not ext:
+        return ''
+    exe = ''
+    try:
+        shlwapi = ctypes.windll.shlwapi
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        # ASSOCF_NONE=0, ASSOCSTR_EXECUTABLE=2；AssocQueryString 已处理"用户手动改过默认程序"
+        hr = shlwapi.AssocQueryStringW(0, 2, ext, 'open', buf, ctypes.byref(size))
+        if hr == 0 and buf.value:
+            exe = buf.value
+    except Exception:
+        log.debug('AssocQueryString 失败：%s', path, exc_info=True)
+    if not exe:
+        exe = _assoc_from_registry(ext)
+    if exe and os.path.basename(exe).lower() in SHELL_WRAPPER_IMAGES:
+        log.info('%s 的关联程序是系统兜底宿主 %s，忽略', ext, os.path.basename(exe))
+        return ''
+    return exe
+
+
+def _assoc_from_registry(ext):
+    """AssocQueryString 不可用时的回退：ProgId → shell\\open\\command → 取出 exe 路径。"""
+    try:
+        import winreg
+    except ImportError:
+        return ''
+    prog_id = ''
+    for root, key in ((winreg.HKEY_CURRENT_USER, r'Software\Classes' + ext),
+                      (winreg.HKEY_CLASSES_ROOT, ext)):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                prog_id = winreg.QueryValueEx(k, '')[0]
+        except OSError:
+            continue
+        if prog_id:
+            break
+    if not prog_id:
+        return ''
+    for root in (winreg.HKEY_CLASSES_ROOT, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(root, r'%s\shell\open\command' % prog_id) as k:
+                cmd = winreg.QueryValueEx(k, '')[0]
+        except OSError:
+            continue
+        exe = _first_token_path(cmd)
+        if exe and os.path.isfile(exe):
+            return exe
+    return ''
+
+
+def _first_token_path(cmd):
+    """从 `"C:\\x\\a.exe" "%1"` 这类命令行里取出可执行文件路径。"""
+    if not cmd:
+        return ''
+    cmd = cmd.strip()
+    if cmd.startswith('"'):
+        end = cmd.find('"', 1)
+        return cmd[1:end] if end > 1 else ''
+    return cmd.split()[0] if cmd.split() else ''
+
+
+def find_pids_by_commandline(path):
+    """
+    找出命令行里包含该文件路径的进程，返回 [(pid, 镜像名)]。
+
+    依据：Windows 打开文档时会把它作为参数传给宿主程序
+    （实测 `draw.io.exe "…\\x.drawio"`），因此命令行是"谁承载了这个文件"最直接的证据。
+    返回空表示没有进程带这个参数——典型情况是单实例应用把请求转交给了已在运行的实例，
+    此时主进程的命令行里不会出现新文件。
+    """
+    if sys.platform != 'win32' or not path:
+        return []
+    try:
+        target = os.path.normcase(os.path.normpath(str(path)))
+    except Exception:
+        return []
+    if not target:
+        return []
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return []
+
+    hits = []
+    pythoncom.CoInitialize()
+    try:
+        wmi = win32com.client.GetObject('winmgmts:')
+        for proc in wmi.ExecQuery('SELECT ProcessId, Name, CommandLine FROM Win32_Process'):
+            cmd = proc.CommandLine or ''
+            if cmd and target in os.path.normcase(cmd):
+                hits.append((int(proc.ProcessId), proc.Name or ''))
+    except Exception:
+        log.debug('按命令行定位进程失败：%s', path, exc_info=True)
+        return []
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+    return hits
 
 
 def launch_program(path):
@@ -294,21 +484,20 @@ def launch_program(path):
             subprocess.Popen(['xdg-open', resolved])
         return None
 
-    if HAS_WIN32:
+    # 文档类（.drawio / .md / .docx / 图片 …）：交给系统关联程序打开。
+    # 用 ShellExecuteEx 而不是 WScript.Shell.Run —— 后者对文件关联返回 0，
+    # 拿不到 PID，关闭时就没有任何线索（BUG-005）。
+    if sys.platform == 'win32':
+        pid = open_via_shell(resolved)
+        if pid:
+            log.info('由系统关联程序打开：%s（pid=%s）', resolved, pid)
+            return ShellProc(pid, resolved), resolved
+        # 仍然拿不到 PID 也要把文件打开，关闭时再按命令行 / 关联程序兜底
         try:
-            shell = Dispatch('WScript.Shell')
-            pid = shell.Run(resolved, 1, False)
-            if pid:
-                return ShellProc(pid, resolved), resolved
-
             os.startfile(path)
-            return None
         except Exception:
-            try:
-                os.startfile(path)
-            except Exception:
-                pass
-            return None
+            log.exception('打开文件失败：%s', path)
+        return None
 
     try:
         os.startfile(path)
@@ -1363,8 +1552,15 @@ class LauncherWindow(QMainWindow):
 
     def _close_targets(self, paths):
         """
-        把列表条目解析为可关闭目标 [(原路径, 镜像名)]。
-        文件夹与无法按镜像名判定的脚本类（.bat/.cmd）镜像名为 None。
+        把列表条目解析为可关闭目标 [(原路径, 镜像名, 类型)]。
+
+        类型：
+          'exe'      自身就是可执行文件，可直接按镜像名判定；
+          'script'   .bat/.cmd，真正跑起来的是 cmd.exe，只能靠启动时记下的 PID；
+          'document' .drawio / .md / .docx 等，镜像名来自文件关联（如 draw.io.exe），
+                     关闭时再叠加"命令行含文件路径"的精确匹配。
+
+        解析不到镜像名时 image 为 None。
         """
         targets = []
         for p in paths:
@@ -1378,9 +1574,18 @@ class LauncherWindow(QMainWindow):
                 resolved = p
             ext = os.path.splitext(resolved)[1].lower()
             if ext in ('.exe', '.com'):
-                targets.append((p, os.path.basename(resolved)))
+                targets.append((p, os.path.basename(resolved), 'exe'))
+            elif ext in ('.bat', '.cmd'):
+                targets.append((p, None, 'script'))
             else:
-                targets.append((p, None))     # .bat/.cmd 等，进程名是 cmd.exe
+                # 文档类：借文件关联找出宿主程序（.drawio → draw.io.exe）
+                exe = assoc_executable(resolved)
+                image = os.path.basename(exe) if exe else None
+                targets.append((p, image, 'document'))
+                if image:
+                    log.info('文档条目 %s：关联程序为 %s', os.path.basename(p), image)
+                else:
+                    log.info('文档条目 %s：解析不到关联程序', os.path.basename(p))
         return targets
 
     def _find_launched(self, path):
@@ -1560,9 +1765,9 @@ class LauncherWindow(QMainWindow):
         log.info('关闭检查开始：列表 %d 项（程序 %d / 文件夹 %d），进程快照 %d 种镜像',
                  len(paths), len(program_paths), len(folder_paths), len(proc_map))
 
-        running = []      # [(path, image)]
+        running = []      # [(path, image, [命令行命中的精确 PID])]
         skipped = []      # [(path, reason)]
-        for path, image in self._close_targets(program_paths):
+        for path, image, kind in self._close_targets(program_paths):
             if entry_kind(path) == 'missing':
                 skipped.append((path, '路径已不存在'))
                 continue
@@ -1570,22 +1775,35 @@ class LauncherWindow(QMainWindow):
             if launched is not None:
                 pid = getattr(launched[0], 'pid', None) if launched[0] else None
                 # 记录里的 PID 可能早已失效（单实例应用会把请求转交给已有进程后自行退出），
-                # 因此不能只看"有记录"就认定为运行中，必须确认镜像仍在快照里。
+                # 因此不能只看"有记录"就认定为运行中，必须确认 PID 仍在快照里。
                 if pid and self._pid_in_map(pid, proc_map):
-                    running.append((path, image))
+                    running.append((path, image, [pid]))
                     continue
                 if launched[3] and any(self._pid_in_map(p, proc_map) for p in launched[3]):
-                    running.append((path, image))
+                    running.append((path, image, list(launched[3])))
                     continue
-                log.info('%s：记录的启动 PID 已失效，改按镜像名判定', get_display_name(path))
+                log.info('%s：记录的启动 PID 已失效，改用命令行 / 镜像名判定',
+                         get_display_name(path))
+
+            # 文档类条目：命令行里带这个文件路径的进程，才是真正承载它的那个。
+            # 这一步比按镜像名精确——不会连带关闭同一程序的其它窗口。
+            if kind == 'document':
+                hits = find_pids_by_commandline(path)
+                if hits:
+                    pids = [pid for pid, _name in hits]
+                    log.info('%s：按命令行定位到 PID %s（%s）', get_display_name(path),
+                             pids, [name for _, name in hits])
+                    running.append((path, image, pids))
+                    continue
+
             if image is None:
-                skipped.append((path, '脚本类且非本次启动，无法判定'))
+                skipped.append((path, '无法判定（没有关联程序，也不是本次启动）'))
                 continue
             if own_name and image.lower() == own_name:
                 skipped.append((path, '启动器自身'))
                 continue
             if image.lower() in proc_map:
-                running.append((path, image))
+                running.append((path, image, []))
             else:
                 skipped.append((path, '未运行'))
 
@@ -1593,7 +1811,7 @@ class LauncherWindow(QMainWindow):
 
         log.info('判定结果：运行中程序 %d 项 %s；可整窗关闭的窗口 %d 个 %s；混有列表外标签 %d 个 %s；程序跳过 %d 项'
                  ' %s',
-                 len(running), [os.path.basename(p) for p, _ in running],
+                 len(running), [(os.path.basename(p), img, pids) for p, img, pids in running],
                  len(closable), [self._window_label(w) for w in closable],
                  len(mixed), [self._window_label(w) for w in mixed],
                  len(skipped), [(os.path.basename(p), r) for p, r in skipped])
@@ -1616,7 +1834,14 @@ class LauncherWindow(QMainWindow):
 
         sections = []
         if running:
-            names = [get_display_name(p) for p, _ in running]
+            names = []
+            for p, img, pids in running:
+                label = get_display_name(p)
+                is_document = os.path.splitext(p)[1].lower() not in ('.exe', '.com')
+                if is_document and not pids and img:
+                    # 没有命令行证据，只能按关联程序关闭 —— 会连带关掉同程序的其它窗口
+                    label += '（将关闭 %s 的全部实例）' % img
+                names.append(label)
             detail = '\n'.join('· ' + n for n in names[:12])
             if len(names) > 12:
                 detail += '\n· …等共 %d 个' % len(names)
@@ -1634,6 +1859,10 @@ class LauncherWindow(QMainWindow):
             text += '\n\n另有 %d 项未运行或无法判定，将自动跳过。' % len(skipped)
         if unopened:
             text += '\n其中 %d 个文件夹当前没有打开的窗口，自然跳过。' % len(unopened)
+        if any(img and not pids and os.path.splitext(p)[1].lower() not in ('.exe', '.com')
+               for p, img, pids in running):
+            text += ('\n\n注：标记了程序名的条目本身是文档（如 .drawio），没有独立进程，'
+                     '只能按"打开它的程序"关闭，因此会同时关闭该程序的其他窗口。')
         text += '\n\n关闭后不可恢复，请确认已保存工作。'
 
         reply = QMessageBox.question(self, '确认关闭', text,
@@ -1677,10 +1906,10 @@ class LauncherWindow(QMainWindow):
             self._launch_thread.join(timeout=1)
 
         results = []
-        for path, image in running:
-            results.append(self._kill_target(path, image))
+        for path, image, pids in running:
+            results.append(self._kill_target(path, image, pids))
 
-        images = [img for _, img in running if img]
+        images = [img for _, img, _pids in running if img]
         remaining = self._wait_until_gone(images)
 
         # 只有确实因权限被拒、且进程仍在，才询问是否提权重试；提权会弹 UAC
@@ -1700,6 +1929,11 @@ class LauncherWindow(QMainWindow):
 
         closed, failed = 0, []
         for res in results:
+            if res.get('precise_closed'):
+                # 承载进程已按命令行 PID 关掉；此时再按关联程序名复核会误判
+                # （例如 .py 的关联程序是 Code.exe，用户的 VS Code 当然还在）
+                closed += 1
+                continue
             image = (res.get('image') or '').lower()
             if image and image in remaining:
                 reason = '权限不足（需管理员）' if image in {d.lower() for d in denied} \
@@ -1775,15 +2009,34 @@ class LauncherWindow(QMainWindow):
             pass
         return False, ''
 
-    def _kill_target(self, path, image):
+    def _kill_target(self, path, image, pids=None):
         """
-        关闭单个目标：先按本次记录的 PID（含伴生 PID），**再按镜像名兜底**。
+        关闭单个目标，按四层优先级：
 
-        镜像名这一步不能省：若程序已在运行，再次启动时新进程往往把请求转交给已有实例
-        后立即退出（Electron / Tauri 的单实例行为），记录的 PID 随即失效。
-        旧实现用 `elif image` 跳过镜像名关闭，于是出现"能打开、关不掉"。
+          1. **命令行命中的 PID**（`pids`）——文档类最精确的一层，命中的就是"打开这个文件的进程"；
+          2. 本次启动记录的 PID（含 .bat/.cmd 的差集 PID）；
+          3. **镜像名**——会命中同名全部实例，是单实例应用（转交后新进程退出）的兜底；
+          4. 登记过的伴生进程名（如 Steam 中转的脚本）。
+
+        第 1 层全部关闭成功时**不再**走第 3 层，否则"精确关闭"会退化成"全杀同程序"。
         """
-        result = {'path': path, 'image': image, 'denied': False, 'steps': []}
+        result = {'path': path, 'image': image, 'denied': False, 'steps': [],
+                  'precise_closed': False}
+
+        precise = [p for p in (pids or []) if self._pid_info(p)[0]]
+        for p in precise:
+            ok, rc, out = self._taskkill(['/f', '/t', '/pid', str(p)])
+            result['steps'].append(('cmdline', p, ok, rc))
+            if self._is_access_denied(out):
+                result['denied'] = True
+        if precise:
+            alive = [p for p in precise if self._pid_info(p)[0]]
+            if not alive:
+                result['precise_closed'] = True
+                log.info('关闭目标 %s | 按命令行命中的 PID %s 关闭成功', path, precise)
+                return result
+            log.warning('%s：命令行命中的 PID %s 未全部关闭，继续按镜像名兜底', path, alive)
+
         launched = self._find_launched(path)
 
         if launched is not None:

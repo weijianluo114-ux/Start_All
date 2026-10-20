@@ -94,7 +94,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.9.0 ^
+    --name LaunchForge_v1.9.1 ^
     src\launchforge.py
 ```
 
@@ -111,6 +111,7 @@ python test_step4_close_robustness.py
 python test_step7_close_folders.py
 python test_step8_taiji_button.py
 python test_step9_pill_layout.py
+python test_step10_document_entries.py
 pythonw test_step6_no_console_flash.py
 ```
 
@@ -161,6 +162,9 @@ pythonw test_step6_no_console_flash.py
   关闭时会连带关掉同一窗口里的其他标签（因此默认会先询问）。详见
   [`docs/04-问题/Q-003`](docs/04-问题/Q-003-资源管理器窗口的枚举与关闭.md)。
 - **按镜像名关闭会命中同名全部实例**：列表里放一个 `chrome.exe`，会关掉系统里所有 Chrome。
+- **文档类条目（.drawio / .md / .docx）会按“打开它的程序”关闭**：优先用命令行精确定位，
+  定位不到时按文件关联的程序名关闭，可能连带关闭该程序的其他窗口（确认框会标注）；
+  商店版（UWP）应用如商店版记事本，只能按镜像名关闭。
 - `.bat` / `.cmd` 条目启动时仍会显示控制台窗口（批处理本身需要），这是刻意保留的行为。
 - 未做代码签名，首次运行可能触发 SmartScreen 提示，选择「更多信息 → 仍要运行」即可。
 

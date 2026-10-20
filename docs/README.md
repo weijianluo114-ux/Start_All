@@ -4,9 +4,9 @@
 
 | 项目 | 位置 |
 |---|---|
-| 当前版本 | **v1.9.0** |
+| 当前版本 | **v1.9.1** |
 | 源码主副本 | `../src/launchforge.py` |
-| 可执行产物 | `../LaunchForge_v1.9.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
+| 可执行产物 | `../LaunchForge_v1.9.1.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
 | 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
@@ -83,3 +83,4 @@
 | BUG-002 | 部分程序能打开但关不掉 | 已修复（v1.4.1） |
 | BUG-003 | 关闭程序时闪现控制台黑框 | 已修复（v1.6.1） |
 | BUG-004 | Release 正文只剩一行 Full Changelog | 已修复（工作流，后续发布生效） |
+| BUG-005 | 文档类条目（.drawio 等）能打开但关不掉 | 已修复（v1.9.1） |
