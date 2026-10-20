@@ -64,7 +64,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.7.0'
+APP_VERSION = '1.8.0'
 
 log = logging.getLogger('launchforge')
 
@@ -530,7 +530,7 @@ class TaijiLaunchButton(QWidget):
         super().__init__(parent)
         self._d = int(diameter)
         self._margin = 16                     # 留给落影
-        self._gap = 5                         # 两条鱼之间的缝隙
+        self._gap = 4                         # 两条鱼之间的缝隙（只透底色，不加投影）
         self._cache = None
         self.setFixedSize(self._d + self._margin * 2, self._d + self._margin * 2)
         self.setMouseTracking(True)
@@ -667,6 +667,17 @@ class TaijiLaunchButton(QWidget):
         spec.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.fillPath(path, QBrush(spec))
 
+        # 2b) 内在发光：用"自身颜色的提亮版"做径向渐变。
+        # 直接叠白色会把玉绿冲成灰绿，只有提高自身明度才有"从里面亮"的观感。
+        bright = light.lighter(124)
+        inner = QRadialGradient(QPointF(cx, cy), radius * 0.80)
+        inner.setColorAt(0.0, QColor(bright.red(), bright.green(), bright.blue(),
+                                    86 if enabled else 46))
+        inner.setColorAt(0.42, QColor(bright.red(), bright.green(), bright.blue(), 34))
+        inner.setColorAt(0.78, QColor(bright.red(), bright.green(), bright.blue(), 9))
+        inner.setColorAt(1.0, QColor(bright.red(), bright.green(), bright.blue(), 0))
+        p.fillPath(path, QBrush(inner))
+
         # 3) 底部内阴影：制造厚度
         shade = QLinearGradient(QPointF(0, cy + radius * 0.15), QPointF(0, rect.bottom()))
         shade.setColorAt(0.0, QColor(0, 0, 0, 0))
@@ -771,21 +782,9 @@ class TaijiLaunchButton(QWidget):
         self._paint_fish(p, left, 'run')
         self._paint_fish(p, right, 'close')
 
-        # 缝隙投影：沿 S 曲线在缝内压一道淡影，两块才像真的分开而不是画上去的
-        _big, _l, _r, _eyes, _er, _radius, _cx, _cy = self._geometry()
-        divider = QPainterPath()
-        divider.moveTo(_cx, _cy - _radius)
-        divider.arcTo(QRectF(_cx - _radius / 2.0, _cy - _radius, _radius, _radius), 90, -180)
-        divider.arcTo(QRectF(_cx - _radius / 2.0, _cy, _radius, _radius), 90, 180)
-        p.save()
-        p.setBrush(Qt.NoBrush)
-        pen = QPen(QColor(0, 0, 0, 32))
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.FlatCap)
-        p.setPen(pen)
-        p.translate(1.0, 1.6)
-        p.drawPath(divider)
-        p.restore()
+        # 中心发光：两块之间留出的缝只透底色，靠这层柔光让盘心"亮起来"，
+        # 看上去像光从内部透出，而不是靠深色阴影把两块分开。
+        self._paint_core_glow(p, big, _radius, _cx, _cy)
 
         # 鱼眼：左鱼嵌红点、右鱼嵌绿点
         self._paint_eye(p, eyes[0], eye_r, self.CLOSE_COLORS, self._run_enabled)
@@ -794,6 +793,37 @@ class TaijiLaunchButton(QWidget):
         self._paint_bezel(p, big)
         self._paint_text(p)
         p.end()
+
+    def _paint_core_glow(self, p, big, radius, cx, cy):
+        """
+        中心内发光：径向柔光 + 一枚更集中的球面亮斑。
+
+        两层叠加才像"从里面亮"，单层纯白渐变更像蒙了一层雾。
+        整体裁剪在圆内，边缘不留亮边，避免破坏外圈包边。
+        """
+        p.save()
+        clip = QPainterPath()
+        clip.addEllipse(big)
+        p.setClipPath(clip)
+        p.setPen(Qt.NoPen)
+
+        # 1) 跨缝柔光：让盘心整体更亮，缝两侧也跟着提亮，光才"连贯"
+        halo = QRadialGradient(QPointF(cx, cy), radius * 0.85)
+        halo.setColorAt(0.0, QColor(255, 255, 255, 44))
+        halo.setColorAt(0.35, QColor(255, 255, 255, 22))
+        halo.setColorAt(0.70, QColor(255, 255, 255, 7))
+        halo.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(QBrush(halo))
+        p.drawEllipse(big)
+
+        # 2) 球面亮斑：半径小、衰减快，做出"鼓起来受光"的点
+        core = QRadialGradient(QPointF(cx, cy - radius * 0.06), radius * 0.34)
+        core.setColorAt(0.0, QColor(255, 255, 255, 64))
+        core.setColorAt(0.55, QColor(255, 255, 255, 18))
+        core.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(QBrush(core))
+        p.drawEllipse(big)
+        p.restore()
 
     def _paint_bezel(self, p, big):
         """外圈包边：左上亮、右下暗，让整个圆盘像嵌在面板上。"""

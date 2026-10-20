@@ -4,9 +4,9 @@
 
 | 项目 | 位置 |
 |---|---|
-| 当前版本 | **v1.7.0** |
+| 当前版本 | **v1.8.0** |
 | 源码主副本 | `../src/launchforge.py` |
-| 可执行产物 | `../LaunchForge_v1.7.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
+| 可执行产物 | `../LaunchForge_v1.8.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
 | 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
@@ -53,7 +53,7 @@
 | REQ-003 | 支持文件夹条目 | 已完成（v1.4.0） |
 | REQ-004 | 多文件夹合并到单窗口 | **已回退（v1.6.0）**，见 Q-002 |
 | REQ-005 | 关闭列表内文件夹对应的窗口 | 已完成（v1.7.0） |
-| REQ-006 | 顶部太极式启动 / 关闭控件 | 待验收（v1.8.0） |
+| REQ-006 | 顶部太极式启动 / 关闭控件 | 已完成（v1.8.0） |
 
 ## 功能索引
 

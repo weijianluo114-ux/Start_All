@@ -11,7 +11,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| 顶部太极圆盘 | 左半绿=一键启动、右半红=关闭全部；3D 质感，启动中左半自动置灰 |
+| 顶部太极圆盘 | 左半绿=一键启动、右半红=关闭全部；3D 浮雕 + 盘心发光，启动中绿鱼自动置灰 |
 | 预设方案 | 多套方案自由切换，改动即时保存，无「保存」按钮 |
 | 一键启动 | 按列表顺序启动全部条目；程序并发、文件夹随后打开 |
 | 安全关闭 | 先确认 → 检测是否真的在运行 → 逐项关闭 → 复查 → 汇总；**未运行的自动跳过** |
@@ -92,7 +92,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.7.0 ^
+    --name LaunchForge_v1.8.0 ^
     src\launchforge.py
 ```
 
