@@ -4,9 +4,9 @@
 
 | 项目 | 位置 |
 |---|---|
-| 当前版本 | **v1.14.0** |
+| 当前版本 | **v1.14.1** |
 | 源码主副本 | `../src/launchforge.py`（界面）；`../src/lf_i18n.py`（四语文案表） |
-| 可执行产物 | `../LaunchForge_v1.14.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
+| 可执行产物 | `../LaunchForge_v1.14.1.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
 | 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
@@ -62,6 +62,7 @@
 | REQ-012 | 全局字体设置（搭配 + 字号） | 已完成（v1.12.0） |
 | REQ-013 | 圆盘放大与盘面文字修正 | 已完成（v1.13.0） |
 | REQ-014 | 界面多语言（中 / 英 / 日 / 繁） | 已完成（v1.14.0） |
+| BUG-006 | 点击「设置」后残留虚线焦点环 | 已修复（v1.14.1） |
 
 ## 功能索引
 

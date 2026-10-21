@@ -75,7 +75,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.14.0'
+APP_VERSION = '1.14.1'
 
 log = logging.getLogger('launchforge')
 
@@ -1719,6 +1719,7 @@ class PillButton(QPushButton):
 
         self._hover_t = 0.0
         self._press_t = 0.0
+        self._kb_focus = False          # 焦点是否来自键盘（见 focusInEvent）
 
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(self._height)
@@ -1795,6 +1796,17 @@ class PillButton(QPushButton):
         self._glide(self._press_anim, '_press_t', 0.0)
         super().mouseReleaseEvent(event)
 
+    def focusInEvent(self, event):
+        # 只认键盘导航带来的焦点：鼠标点过的按钮不该留框（点「设置」后虚线常驻就是这个问题）
+        self._kb_focus = event.reason() in _KB_FOCUS_REASONS
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._kb_focus = False
+        self.update()
+        super().focusOutEvent(event)
+
     # ---- 绘制 ----
     def paintEvent(self, event):
         p = QPainter(self)
@@ -1864,11 +1876,12 @@ class PillButton(QPushButton):
         p.setPen(text_color)
         p.drawText(rect.translated(0, 0.9 * pr), Qt.AlignCenter, self.text())
 
-        # 6) 键盘焦点环：只在 Tab 聚焦时出现
-        if enabled and self.hasFocus():
-            pen = QPen(QColor(168, 135, 63, 165))
+        # 6) 键盘焦点环：只在 Tab 导航时出现，鼠标点击不画
+        #    （v1.15.0 起去掉虚线段——点击「设置」后那圈虚线会一直挂着，很扎眼）
+        if enabled and _keyboard_focused(self):
+            pen = QPen(QColor(168, 135, 63, 130))
             pen.setWidthF(1.0)
-            pen.setStyle(Qt.DashLine)
+            pen.setStyle(Qt.SolidLine)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             inner = rect.adjusted(2.0, 2.0, -2.0, -2.0)
@@ -1961,6 +1974,17 @@ def _mix_color(a, b, t):
                   int(a.blue() + (b.blue() - a.blue()) * t))
 
 
+# 只有这几种 reason 代表"用户在键盘上导航到这里的"。
+# 鼠标点击是 MouseFocusReason，切换窗口是 ActiveWindowFocusReason，
+# 这两种都不该留下焦点环——点过「设置」之后金色虚线一直挂着，就是这么来的。
+_KB_FOCUS_REASONS = (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason)
+
+
+def _keyboard_focused(widget):
+    """当前焦点是否来自键盘导航（决定要不要画焦点环）。"""
+    return widget.hasFocus() and getattr(widget, '_kb_focus', False)
+
+
 class ToggleSwitch(QWidget):
     """
     胶囊形开关，纯 `QPainter` 绘制。
@@ -1982,6 +2006,7 @@ class ToggleSwitch(QWidget):
         self._hover = False
         self._pressed = False
         self._pos = 1.0 if checked else 0.0
+        self._kb_focus = False          # 焦点是否来自键盘（见 focusInEvent）
 
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -2093,15 +2118,26 @@ class ToggleSwitch(QWidget):
         p.setPen(pen)
         p.drawEllipse(QPointF(cx, cy), radius, radius)
 
-        # 6) 焦点框：键盘操作时可见，鼠标操作时不干扰视觉
-        if self.hasFocus():
+        # 6) 焦点框：只在键盘导航时可见；鼠标点开关后不再留一圈点线
+        if _keyboard_focused(self):
             pen = QPen(QColor(76, 195, 138, 150) if t > 0.5 else QColor(140, 125, 90, 140))
             pen.setWidthF(1.0)
-            pen.setStyle(Qt.DotLine)
+            pen.setStyle(Qt.SolidLine)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 4, 4)
         p.end()
+
+    def focusInEvent(self, event):
+        self._kb_focus = event.reason() in _KB_FOCUS_REASONS
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._kb_focus = False
+        self.update()
+        super().focusOutEvent(event)
+
 
     # ---- 交互 ----
     def mousePressEvent(self, event):
@@ -2423,6 +2459,7 @@ class SizeSlider(QWidget):
         self._dragging = False
         self._hover = False
         self._hover_t = 0.0
+        self._kb_focus = False          # 焦点是否来自键盘（见 focusInEvent）
 
         self.setFixedHeight(self.HEIGHT)
         self.setMinimumWidth(120)
@@ -2532,14 +2569,25 @@ class SizeSlider(QWidget):
         p.setPen(QPen(QColor(168, 135, 63, 210), 1.2))
         p.drawEllipse(QPointF(knob_x, cy), r, r)
 
-        # 5) 键盘焦点环：只在 Tab 聚焦时出现
-        if self.hasFocus():
+        # 5) 键盘焦点环：只在 Tab 导航时出现，拖动滑块不留框
+        if _keyboard_focused(self):
             pen = QPen(QColor(168, 135, 63, 150))
-            pen.setStyle(Qt.DashLine)
+            pen.setStyle(Qt.SolidLine)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0), 6, 6)
         p.end()
+
+    def focusInEvent(self, event):
+        self._kb_focus = event.reason() in _KB_FOCUS_REASONS
+        self.update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._kb_focus = False
+        self.update()
+        super().focusOutEvent(event)
+
 
     # ---- 交互 ----
     def mousePressEvent(self, event):
