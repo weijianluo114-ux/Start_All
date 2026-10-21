@@ -2,10 +2,16 @@
 
 [![build](https://github.com/weijianluo114-ux/Start_All/actions/workflows/build.yml/badge.svg)](https://github.com/weijianluo114-ux/Start_All/actions/workflows/build.yml)
 
+**简体中文** · [English](#english)
+
 把常用程序与文件夹编成「预设方案」，**一键批量启动**、**安全批量关闭**的 Windows 桌面启动器。
 基于 Python + PyQt5，打包为单文件绿色版：无安装、无后台服务、不写注册表。
 
 ![主界面](docs/images/main-window.png)
+
+> **界面语言**：默认简体中文。打开「设置 → 界面语言」即可切换 **简体中文 / English / 日本語 / 繁體中文**，
+> 切换立即生效并记住；不需要重启，也不需要重新安装。英文界面见
+> [`docs/images/i18n-main-en.png`](docs/images/i18n-main-en.png)。
 
 ## 特性
 
@@ -13,7 +19,8 @@
 |---|---|
 | 太极圆盘 | 左半浅绿=一键启动、右半鲜血红=关闭全部；3D 浮雕 + 盘心发光，启动中绿鱼自动置灰 |
 | 圆侧胶囊操作区 | 六项操作分列圆盘两侧，胶囊长度按字数变化；长条靠上下、短条靠中间 |
-| 设置面板 | 小面板（400×224），「开机自启动」开关即时生效；悬停有提亮、金边与投影反馈 |
+| 设置面板 | 宽 420、高度按内容算；开机自启动、界面语言、字体搭配、字号四项即时生效；悬停有提亮、金边与投影反馈 |
+| 界面语言 | 简体中文（默认）/ English / 日本語 / 繁體中文，切换即时生效并记住 |
 | 字体与动效 | 三级字重 + 按角色选族；悬停 110ms、按下 90ms 逐帧过渡，尊重系统「动画效果」开关 |
 | 预设方案 | 多套方案自由切换，改动即时保存，无「保存」按钮 |
 | 一键启动 | 按列表顺序启动全部条目；程序并发、文件夹随后打开 |
@@ -42,8 +49,8 @@
 4. **关闭**：点圆盘的**右半（红色）**→ 确认后关闭列表内正在运行的程序，以及列表内文件夹对应的资源管理器窗口；
    未运行、没有打开窗口、无法判定的条目会跳过并说明原因。
    若某个窗口里还开着列表之外的文件夹（Win11 标签页），会单独问你要不要整窗关闭。
-5. **设置**：点右下角「设置」→ 打开 400×224 的小面板，可开关**开机自启动**。
-   改动即时生效，没有保存按钮；写入失败会回滚开关并说明原因。
+5. **设置**：点右下角「设置」→ 打开小面板，可开关**开机自启动**、切换**界面语言**、调整**字体搭配与字号**。
+   改动即时生效，没有保存按钮；写入失败会回滚并说明原因。
 
 按钮一览：
 
@@ -54,7 +61,7 @@
 | 输入路径 | 圆左侧下 | 手动粘贴路径，支持 `%USERPROFILE%`、`~` 与带引号粘贴 |
 | 删除选中 | 圆右侧上 | 从列表与预设中移除 |
 | 日志 | 圆右侧中 | 打开日志所在目录 |
-| 设置 | 圆右侧下 | 打开设置面板：开机自启动开关（v1.10.0 起） |
+| 设置 | 圆右侧下 | 打开设置面板：开机自启动、界面语言、字体搭配与字号 |
 | 新建 / 删除 | 预设行 | 新建 / 删除预设（至少保留一个） |
 | 圆盘左半（浅绿） | 中央 | 启动当前预设全部条目；启动进行中变灰不可点 |
 | 圆盘右半（鲜血红） | 中央 | 确认后关闭列表内正在运行的程序**和文件夹窗口**，启动器本身不退出 |
@@ -98,7 +105,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.13.0 ^
+    --name LaunchForge_v1.14.0 ^
     src\launchforge.py
 ```
 
@@ -120,6 +127,7 @@ python test_step11_settings_autostart.py
 python test_step12_typography_motion.py
 python test_step13_font_settings.py
 python test_step14_taiji_text.py
+python test_step15_i18n.py
 pythonw test_step6_no_console_flash.py
 ```
 
@@ -130,7 +138,8 @@ pythonw test_step6_no_console_flash.py
 
 ```
 .
-├─ src/launchforge.py          # 唯一源码入口
+├─ src/launchforge.py          # 界面与全部业务逻辑（唯一入口）
+├─ src/lf_i18n.py              # 四语文案表（117 条 × 4 语言）
 ├─ assets/logo.ico             # 图标（打包时嵌入）
 ├─ scripts/build.bat           # 一键构建
 ├─ tests/                      # 验收脚本（真实进程，不是 mock）
@@ -156,7 +165,8 @@ pythonw test_step6_no_console_flash.py
 2. `scripts\build.bat` 本地构建自测；
 3. `git add -A && git commit -m "release: vX.Y.Z" && git push`；
 4. `git tag vX.Y.Z && git push origin vX.Y.Z`；
-5. GitHub Actions 自动在 Windows 环境构建，并把 `一键多启_vX.Y.Z.exe` 挂到同名 Release。
+5. GitHub Actions 自动在 Windows 环境构建，并把 `LaunchForge_vX.Y.Z.exe` 挂到同名 Release
+   （资产名必须是 ASCII：历史上有版本因中文名被 Actions 丢字符，产出过 `_vX.Y.Z.exe`）。
 
 **二进制不提交进仓库**：仓库只保留源码与文档，历史版本由 Releases 保存；
 本地仓库根目录只保留当前可用的测试版 exe。
@@ -184,5 +194,165 @@ pythonw test_step6_no_console_flash.py
 此后所有功能迭代都记录在 [`CHANGELOG.md`](CHANGELOG.md) 与 `docs/`。
 
 ## 许可证
+
+[MIT](LICENSE)
+
+---
+
+## English
+
+**LaunchForge** ("One-Click Multi-Launch") is a Windows desktop launcher that groups your
+everyday programs and folders into **presets**, starts them all with one click, and closes
+them again safely. Python + PyQt5, shipped as a single portable `.exe` — no installer,
+no background service, nothing written to the registry.
+
+> **Language**: the interface ships in **简体中文 (default), English, 日本語 and 繁體中文**.
+> Open **Settings → Interface language** (the first dropdown) to switch. The change applies
+> immediately, needs no restart, and is remembered for next time — the default stays
+> Simplified Chinese.
+
+![Main window (English)](docs/images/i18n-main-en.png)
+
+### Features
+
+| | |
+|---|---|
+| Taiji dial | One circle split like the taiji symbol: left half (green) = start everything, right half (blood red) = close everything. Embossed shading, glowing core, and the green half greys out while launching |
+| Pills around the dial | Six actions on both sides; each pill's width follows its label, long ones sit outward |
+| Presets | Multiple presets, switched from the top row, saved as you edit — there is no "Save" button |
+| One-click start | Starts every entry of the current preset in list order; programs run concurrently, folders open afterwards |
+| Safe close | Confirm → check what is actually running → close item by item → verify → summarise. Anything not running is skipped, with a reason |
+| Folder windows too | "Close everything" also closes the Explorer windows of folders in the list. If a window holds unrelated tabs, it asks first |
+| Folders and any file | Drag & drop, folder picker, or paste a path (quotes and environment variables are handled) |
+| Diagnosable | `%LOCALAPPDATA%\MultiLauncher\logs\launcher.log` records every launch, every `taskkill` and its exit code |
+| Settings | Launch at sign-in, interface language, font family and text size — all applied instantly |
+| Typography | Three weight levels, per-role families, 110 ms hover / 90 ms press transitions, honours the Windows "animation effects" setting |
+
+The launcher **never** starts anything when it opens — only the **left (green)** half of the
+dial runs the list.
+
+### Download
+
+Grab the latest `LaunchForge_vX.Y.Z.exe` from
+[Releases](https://github.com/weijianluo114-ux/Start_All/releases) and double-click it.
+Python and other dependencies are not required.
+
+- Settings and logs live in `%LOCALAPPDATA%\MultiLauncher`
+- Full reset: delete that folder
+- The program writes nothing next to the `.exe`
+
+### Quick start
+
+1. **Add entries** — "Add program" / "Add folder" / "Enter path" on the left of the dial,
+   or simply drag files and folders into the window.
+2. **Create a preset** — "New" at the top right, type a name, then add entries to it.
+3. **Start** — click the **left (green)** half of the dial.
+4. **Close** — click the **right (red)** half and confirm. Programs in the list are closed,
+   together with the Explorer windows of the folders in the list. Entries that are not
+   running, have no window, or cannot be identified are skipped and reported.
+5. **Settings** — the "Settings" pill on the lower right: launch at sign-in, interface
+   language, font family and text size. Everything applies immediately.
+
+### Change the interface language
+
+```
+Settings  →  Interface language  →  English / 日本語 / 繁體中文 / 简体中文
+```
+
+- Takes effect at once; no restart, no reinstall.
+- Stored in `settings.language` inside
+  `%LOCALAPPDATA%\MultiLauncher\launcher_presets.json`; an unknown value falls back to
+  Simplified Chinese instead of breaking the start-up.
+- Language names are always shown in their own language, so you can find yours even if the
+  current interface is unreadable to you.
+- The taiji dial adapts: Chinese and Japanese stack the two characters vertically, English
+  uses the horizontal words `START` / `CLOSE`.
+- The log file stays in Chinese (it is a developer-facing troubleshooting artifact), and
+  preset names are your own data, so they are never translated.
+
+### Run from source
+
+```bash
+git clone git@github.com:weijianluo114-ux/Start_All.git
+cd Start_All
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+python src/launchforge.py
+```
+
+Requires Windows 10/11 and Python 3.9+ (3.12 recommended, matching the release build).
+
+### Build the single-file exe
+
+```bat
+scripts\build.bat
+```
+
+The script reads `APP_VERSION` from `src\launchforge.py`, produces
+`dist\LaunchForge_vX.Y.Z.exe`, copies it to the repository root, rebuilds the desktop
+shortcut, and finally removes older exes plus `build\`, `dist\` and `*.spec` — the
+repository root always holds exactly one executable.
+
+Equivalent command line:
+
+```bat
+python -m PyInstaller --noconfirm --onefile --windowed ^
+    --icon=assets\logo.ico ^
+    --add-data "assets\logo.ico;." ^
+    --version-file=version.txt ^
+    --name LaunchForge_v1.14.0 ^
+    src\launchforge.py
+```
+
+> Note the **semicolon** in `--add-data` on Windows (`source;destination`); it is a colon
+> on Linux/macOS. Release asset names must stay ASCII — GitHub Actions has dropped
+> non-ASCII characters from file names before.
+
+### Tests
+
+```bat
+cd tests
+python test_step1_no_autolaunch.py
+python test_step2_close_all.py
+python test_step3_folders.py
+python test_step4_close_robustness.py
+python test_step7_close_folders.py
+python test_step8_taiji_button.py
+python test_step9_pill_layout.py
+python test_step10_document_entries.py
+python test_step11_settings_autostart.py
+python test_step12_typography_motion.py
+python test_step13_font_settings.py
+python test_step14_taiji_text.py
+python test_step15_i18n.py
+pythonw test_step6_no_console_flash.py
+```
+
+Geometry-sensitive tests must run with `QT_QPA_PLATFORM=windows`; the offscreen backend
+has no font database on this machine and silently falls back to Arial, which makes every
+"is the text clipped" assertion meaningless. All scripts use a throwaway `LOCALAPPDATA`,
+so they never touch your real configuration or your running programs.
+
+### Known limitations
+
+- **Folders cannot be merged into Explorer tabs**: stable Windows does not expose it, so
+  starting several folders opens several windows.
+- **Folder windows can only be closed as a whole**: there is no stable "close one tab" API.
+  If you merged a listed folder into another window, closing it takes the other tabs with it
+  — which is why the app asks first.
+- **Closing by image name hits every instance**: one `chrome.exe` entry closes all of Chrome.
+- **Document entries (.drawio / .md / .docx)** are closed through the program that opens
+  them; when the command line cannot be matched, the associated program is closed instead,
+  which may take its other windows with it. UWP apps (e.g. the Store build of Notepad) can
+  only be closed by image name.
+- `.bat` / `.cmd` entries still show a console window while running — that is inherent to
+  batch files and is kept on purpose.
+- The executable is not code-signed, so SmartScreen may warn on first run: choose
+  "More info → Run anyway".
+
+### License
 
 [MIT](LICENSE)

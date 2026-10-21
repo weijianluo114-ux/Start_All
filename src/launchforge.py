@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QWidget, QMessageBox,
     QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog,
-    QGraphicsDropShadowEffect, QStyledItemDelegate
+    QGraphicsDropShadowEffect, QStyledItemDelegate, QGridLayout
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QDir, QRectF, QPointF, QSize, pyqtSignal, QEvent,
@@ -25,6 +25,10 @@ from PyQt5.QtGui import (
     QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker, QFontDatabase,
     QFontMetrics
 )
+
+# 多语言层独立成文件（v1.14.0）：4200 行的主文件再塞四份译文就没法读了。
+# 静态 import，PyInstaller 会自动收集；源码运行时脚本目录已在 sys.path 上。
+from lf_i18n import Lang, t, LANGUAGES, language_name, DEFAULT_PRESET_NAMES
 
 try:
     from win32com.client import Dispatch
@@ -71,7 +75,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.13.0'
+APP_VERSION = '1.14.0'
 
 log = logging.getLogger('launchforge')
 
@@ -244,8 +248,27 @@ def entry_label(path):
 
 
 def entry_tooltip(path):
-    tip = {'dir': '文件夹', 'file': '文件', 'missing': '路径不存在，启动时将被跳过'}[entry_kind(path)]
+    tip = {'dir': t('list.kind_dir'), 'file': t('list.kind_file'),
+           'missing': t('list.kind_missing')}[entry_kind(path)]
     return '%s\n%s' % (tip, path)
+
+
+def _is_vertical_text(text):
+    """
+    全角（汉字 / 假名）才竖排；出现拉丁字母或数字就转横排。
+
+    盘面一个字的格子约 26px 见方，竖排 "START" 要 5 格 ≈130px，
+    而半条鱼只有 ~70px 高——所以语言一变，排法必须跟着变。
+    """
+    if not text:
+        return True
+    for ch in text:
+        code = ord(ch)
+        wide = (0x2E80 <= code <= 0x9FFF or 0x3040 <= code <= 0x30FF
+                or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFF60)
+        if not wide:
+            return False
+    return True
 
 
 class ShellProc:
@@ -592,7 +615,7 @@ def set_autostart(enabled, key_path=None, value_name=None):
     与关闭流程"失败必须可见"的约定一致。
     """
     if sys.platform != 'win32' or not HAS_WINREG:
-        return False, '当前系统不支持注册表自启动项'
+        return False, t('settings.no_registry')
     key_path = key_path or AUTOSTART_KEY
     value_name = value_name or AUTOSTART_NAME
     try:
@@ -749,6 +772,7 @@ class TaijiLaunchButton(QWidget):
     TEXT_SCALE = 0.33                  # 字径 / 盘半径
     TEXT_LEADING = 1.00                # 行距 / 字径
     TEXT_OFFSET = 0.06                 # 字块与中线的距离 / 盘半径
+    RIM_KEEP = 5.0                     # 字盒离盘沿的最小距离（px）
 
     def __init__(self, diameter=DIAMETER, parent=None):
         super().__init__(parent)
@@ -763,7 +787,7 @@ class TaijiLaunchButton(QWidget):
 
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip('左（绿）：一键启动当前预设　|　右（红）：关闭列表内的程序与文件夹窗口')
+        self.setToolTip(t('main.taiji_tip'))
         self._hover = None
         self._hover_t = 0.0                   # 悬停强度 0→1，驱动光圈与外圈高亮
         self._pressed = None
@@ -792,6 +816,13 @@ class TaijiLaunchButton(QWidget):
     def _set_text_family(self, family):
         """测试用：强制换一种盘面字体（同时清掉命中缓存）。"""
         self._text_family = str(family)
+        self.update()
+
+    def invalidate_text(self):
+        """换语言 / 换字号后调用：盘面文案与排法都变了，缓存必须失效。"""
+        self._text_cache_key = None
+        self._text_payload = None
+        self.setToolTip(t('main.taiji_tip'))
         self.update()
 
 
@@ -1062,72 +1093,36 @@ class TaijiLaunchButton(QWidget):
         """
         盘面文字排布（缓存）。
 
-        字号不是拍脑袋定的：从目标字号开始逐档缩小，直到"两字盒的四角都在鱼身内、
+        两种排法，按语言自动选：
+          · 中文 / 日文：竖排，每字单独绘制；两字共用一条竖列，逐字各自居中会左右错开。
+          · 拉丁文字：横排整词。START 竖排要占 5 个字高，必然顶出鱼身。
+
+        字号不是拍脑袋定的：从目标字号开始逐档缩小，直到"字盒的四角都在鱼身内、
         且离盘沿 ≥5px"。固定比例在 17px 全局字号下会顶到盘沿，靠这一步自适应最稳。
         """
-        key = (self._d, round(FontPrefs.scale(), 2), self._text_family)
+        pairs = (('run', t('main.taiji_run')), ('close', t('main.taiji_close')))
+        vertical = all(_is_vertical_text(text) for _side, text in pairs)
+        key = (self._d, round(FontPrefs.scale(), 2), self._text_family,
+               Lang.CODE, pairs)
         if self._text_cache_key == key:
             return self._text_payload
 
         _big, left_path, right_path, _eyes, eye_r, radius, cx, cy = self._geometry()
         follow = max(0.94, min(1.08, FontPrefs.scale()))
         target = max(14, int(round(radius * self.TEXT_SCALE * follow)))
-        pad = radius * 0.045
-        rim_keep = 5.0            # 字盒离盘沿至少留 5px，避免视觉上"贴着边"
+        paths = {'run': left_path, 'close': right_path}
 
         payload = None
-        for px in range(target, 12, -1):
+        for px in range(target, 11, -1):
             font = QFont(self._text_family)
             font.setPixelSize(px)
             font.setWeight(QFont.Bold)
             fm = QFontMetrics(font)
-            line_h = min(px * self.TEXT_LEADING, radius * 0.37)
-            block = line_h * 2
-            sides, ok = [], True
-
-            for side, text, top in (
-                    ('run', '启动', cy - radius * self.TEXT_OFFSET - block),
-                    ('close', '关闭', cy + radius * self.TEXT_OFFSET)):
-                # 两字共用一条竖列：取两段鱼身的"公共可用区间"，再放在它的中线上。
-                # 逐字各自居中会左右错开，像排版没对齐；共用中线才像一组字。
-                lo, hi = -1e9, 1e9
-                for i in range(len(text)):
-                    y0 = top + i * line_h
-                    band_l, band_r = self._fish_span(side, y0 + 2.0, y0 + line_h - 2.0)
-                    lo = max(lo, band_l)
-                    hi = min(hi, band_r)
-                lo += pad
-                hi -= pad
-                # 给鱼眼让位：眼就在 cx 上方（左鱼）/ 下方（右鱼）
-                if side == 'run':
-                    hi = min(hi, cx - eye_r - 4.0)
-                else:
-                    lo = max(lo, cx + eye_r + 4.0)
-
-                advance = max(fm.horizontalAdvance(ch) for ch in text)
-                if hi - lo < advance + 4.0 or hi - lo < 8.0:
-                    ok = False
-                    break
-
-                box_w = advance + 4.0
-                box_cx = max(lo + box_w / 2.0, min(hi - box_w / 2.0, (lo + hi) / 2.0))
-                path = left_path if side == 'run' else right_path
-                items = []
-                for i, ch in enumerate(text):
-                    box = QRectF(box_cx - box_w / 2.0, top + i * line_h, box_w, line_h)
-                    for corner in (box.topLeft(), box.topRight(),
-                                   box.bottomLeft(), box.bottomRight()):
-                        if (not path.contains(corner)
-                                or math.hypot(corner.x() - cx, corner.y() - cy) > radius - rim_keep):
-                            ok = False
-                            break
-                    if not ok:
-                        break
-                    items.append((ch, box))
-                if not ok:
-                    break
-                sides.append((side, items))
-
+            if vertical:
+                sides, ok = self._layout_vertical(pairs, fm, px, radius, cx, cy, paths, eye_r)
+            else:
+                sides, ok = self._layout_horizontal(pairs, fm, px, radius, cx, cy,
+                                                    paths, eye_r)
             if ok:
                 payload = (font, sides)
                 break
@@ -1142,6 +1137,105 @@ class TaijiLaunchButton(QWidget):
         self._text_cache_key = key
         self._text_payload = payload
         return payload
+
+    def _box_ok(self, box, path, radius, cx, cy):
+        """字盒四角都必须落在鱼身内，且离盘沿留够 RIM_KEEP。"""
+        for corner in (box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()):
+            if not path.contains(corner):
+                return False
+            if math.hypot(corner.x() - cx, corner.y() - cy) > radius - self.RIM_KEEP:
+                return False
+        return True
+
+    def _layout_vertical(self, pairs, fm, px, radius, cx, cy, paths, eye_r):
+        """竖排（中日文）：左鱼整块在中线以上、右鱼在中线以下，避开鱼眼。"""
+        pad = radius * 0.045
+        line_h = min(px * self.TEXT_LEADING, radius * 0.37)
+        sides = []
+        for side, text in pairs:
+            block = line_h * len(text)
+            top = (cy - radius * self.TEXT_OFFSET - block) if side == 'run' \
+                else (cy + radius * self.TEXT_OFFSET)
+
+            # 取所有字所在鱼身区间的公共部分，再把整列放在它的中线上
+            lo, hi = -1e9, 1e9
+            for i in range(len(text)):
+                y0 = top + i * line_h
+                band_l, band_r = self._fish_span(side, y0 + 2.0, y0 + line_h - 2.0)
+                lo = max(lo, band_l)
+                hi = min(hi, band_r)
+            lo += pad
+            hi -= pad
+            # 给鱼眼让位：眼就在 cx 上方（左鱼）/ 下方（右鱼）
+            if side == 'run':
+                hi = min(hi, cx - eye_r - 4.0)
+            else:
+                lo = max(lo, cx + eye_r + 4.0)
+
+            advance = max(fm.horizontalAdvance(ch) for ch in text)
+            if hi - lo < advance + 4.0 or hi - lo < 8.0:
+                return [], False
+            box_w = advance + 4.0
+            box_cx = max(lo + box_w / 2.0, min(hi - box_w / 2.0, (lo + hi) / 2.0))
+            items = []
+            for i, ch in enumerate(text):
+                box = QRectF(box_cx - box_w / 2.0, top + i * line_h, box_w, line_h)
+                if not self._box_ok(box, paths[side], radius, cx, cy):
+                    return [], False
+                items.append((ch, box))
+            sides.append((side, items))
+        return sides, True
+
+    def _layout_horizontal(self, pairs, fm, px, radius, cx, cy, paths, eye_r):
+        """
+        横排（拉丁文字）：整词一行，落在各自鱼身最宽的那一段。
+
+        候选取"离理想高度最近"的排法，理想高度是中线上下 0.17R——
+        再往盘沿靠会被鱼眼挤窄，再往中线靠会贴到 S 形缝隙。
+        """
+        pad = radius * 0.045
+        line_h = min(px * 1.20, radius * 0.36)
+        sides = []
+        for side, text in pairs:
+            box_w = fm.horizontalAdvance(text) + 6.0
+            ideal = cy - radius * 0.17 if side == 'run' else cy + radius * 0.17
+            if side == 'run':
+                low, high = cy - radius * 0.56, cy - radius * 0.05
+            else:
+                low, high = cy + radius * 0.05, cy + radius * 0.56
+            candidates = sorted(range(int(low), int(high) + 1, 2),
+                                key=lambda y: abs(y + line_h / 2.0 - ideal))
+            eye = QPointF(cx, cy - radius / 2.0 if side == 'run' else cy + radius / 2.0)
+
+            chosen = None
+            for y0 in candidates:
+                lo, hi = self._fish_span(side, y0 + 2.0, y0 + line_h - 2.0)
+                lo += pad
+                hi -= pad
+                if hi - lo < box_w:
+                    continue
+                # 离中线留 0.10R：不留这段间距，两个词会在盘心贴成一行，
+                # 看上去像"START CLOSE"一个整句，太极的两半就分不开了。
+                center = (lo + hi) / 2.0
+                gap_keep = radius * 0.10 + box_w / 2.0
+                if side == 'run':
+                    center = min(center, cx - gap_keep)
+                else:
+                    center = max(center, cx + gap_keep)
+                box_cx = max(lo + box_w / 2.0, min(hi - box_w / 2.0, center))
+                box = QRectF(box_cx - box_w / 2.0, y0, box_w, line_h)
+                # 字盒整体离鱼眼太近就换一条高度：眼睛是圆盘的"表情"，不能被字压住
+                if box.adjusted(-eye_r - 2.0, -eye_r - 2.0,
+                                eye_r + 2.0, eye_r + 2.0).contains(eye):
+                    continue
+                if self._box_ok(box, paths[side], radius, cx, cy):
+                    chosen = box
+                    break
+            if chosen is None:
+                return [], False
+            # 整词作为一个绘制单元：逐字绘制会在字距上出现 1px 级的抖动
+            sides.append((side, [(text, chosen)]))
+        return sides, True
 
     def _paint_text(self, p):
         font, sides = self._text_layout()
@@ -1831,6 +1925,34 @@ class PillColumn(QWidget):
         super().resizeEvent(event)
 
 
+class ThemedCombo(QComboBox):
+    """
+    带自绘金色箭头的下拉框。
+
+    起因：QSS 里只要给 `::drop-down` 指定了宽度并清掉边框，Qt 就不再画系统箭头，
+    下拉框看上去和普通输入框完全一样——用户不会知道它能点开（v1.12.0 的遗留）。
+    箭头用两条 1.4px 的圆头线画，和界面里的金线同源；矢量绘制在高 DPI 下不会糊。
+    """
+
+    ARROW_HALF = 4.5
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        color = QColor(Theme.GOLD_DEEP) if self.isEnabled() else QColor('#BDB4A3')
+        pen = QPen(color)
+        pen.setWidthF(1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        cx = self.width() - 13.0
+        cy = self.height() / 2.0
+        half = self.ARROW_HALF
+        p.drawLine(QPointF(cx - half, cy - 1.7), QPointF(cx, cy + 1.9))
+        p.drawLine(QPointF(cx, cy + 1.9), QPointF(cx + half, cy - 1.7))
+        p.end()
+
+
 def _mix_color(a, b, t):
     """按比例混合两色，用于开关在开/关之间的过渡。"""
     t = max(0.0, min(1.0, t))
@@ -2073,17 +2195,34 @@ class SettingRow(QWidget):
 
         self._apply_text_colors()
 
-    def sync_height(self):
+    def sync_height(self, text_width=None):
         """
         行高按文字实际行数计算。
 
         固定 90px 在 13px 基准下刚好，但全局字号调到 17px 时说明会折成三行，
         卡片会裁掉最后一行——这正是"越界"最典型的来源，所以高度随字号长。
+
+        `text_width` 给的是说明文字列的可用宽度：给了就按真实折行算，
+        不给则退回"按换行符数行"。英文/日文的同一句往往比中文长一截，
+        只数换行符会少算一行，最后一行就被压出卡片外。
         """
         title_h = self.title_label.fontMetrics().height()
         line_h = self.desc_label.fontMetrics().lineSpacing()
-        needed = self.PAD_V * 2 + title_h + 5 + line_h * max(1, self._lines)
+        lines = max(1, self._lines)
+        if text_width and line_h > 0:
+            needed_text = self.desc_label.heightForWidth(int(text_width))
+            lines = max(lines, int(math.ceil(needed_text / float(line_h))))
+        needed = self.PAD_V * 2 + title_h + 5 + line_h * lines
         self.setFixedHeight(max(self.HEIGHT, int(round(needed))))
+
+    def set_texts(self, title, description):
+        """换语言时换文案：行数可能变（英文更长），高度要跟着重算。"""
+        self.title_label.setText(title)
+        self.desc_label.setText(description)
+        self._lines = description.count('\n') + 1
+        self.sync_height()
+        self._apply_text_colors()
+        self.update()
 
     # ---- 状态 ----
     def is_checked(self):
@@ -2289,7 +2428,7 @@ class SizeSlider(QWidget):
         self.setMinimumWidth(120)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setToolTip('界面字号 %d–%d px' % (self._min, self._max))
+        self.setToolTip(t('settings.size_tip').format(self._min, self._max))
 
         self._anim = QPropertyAnimation(self, b'hover_t', self)
         self._anim.setDuration(Theme.hover_ms())
@@ -2460,25 +2599,30 @@ class SizeSlider(QWidget):
 
 class SettingsDialog(QDialog):
     """
-    设置面板（v1.10.0 起；v1.12.0 增加全局字体）。
+    设置面板（v1.10.0 起；v1.12.0 增加全局字体；v1.14.0 增加界面语言）。
 
     宽度固定、高度随内容算：字号调到最大时说明会折行、预览会变高，
     固定高度的对话框必然裁字。宽度固定是因为两列对齐靠它，宽度随字号变会显得跳。
-    没有「保存」按钮——开关与字体改动即时生效，失败会回滚并说明原因。
+    没有「保存」按钮——开关、语言、字体改动即时生效，失败会回滚并说明原因。
+
+    卡片内用 QGridLayout 而不是几行 QHBoxLayout：语言与字体两个下拉框必须左右对齐，
+    各排各的会因为标签长短不同而错开几像素（"界面语言" 比 "字号" 宽一倍）。
     """
 
     WIDTH = 420
     MIN_HEIGHT = 384
 
-    def __init__(self, parent=None, key_path=None, value_name=None, on_font_changed=None):
+    def __init__(self, parent=None, key_path=None, value_name=None,
+                 on_font_changed=None, on_language_changed=None):
         super().__init__(parent)
         self._key_path = key_path
         self._value_name = value_name
         self._on_font_changed = on_font_changed
+        self._on_lang_changed = on_language_changed
 
         self.setObjectName('settingsPanel')
         # 标题栏写项目名，面板内标题写「设置」——避免两处都是"设置"造成重复
-        self.setWindowTitle('一键多启 · 设置')
+        self.setWindowTitle(t('app.settings_title'))
         self.setFixedWidth(self.WIDTH)
         self.setWindowFlags((self.windowFlags() | Qt.WindowCloseButtonHint)
                             & ~Qt.WindowContextHelpButtonHint)
@@ -2517,44 +2661,46 @@ class SettingsDialog(QDialog):
             }
         """)
 
-        title = QLabel('设置', self)
-        title.setObjectName('settingsTitle')
-        set_ui_font(title, 17, QFont.Bold, 'display', 0.3)
+        self.title = QLabel(t('settings.title'), self)
+        self.title.setObjectName('settingsTitle')
+        set_ui_font(self.title, 17, QFont.Bold, 'display', 0.3)
 
         enabled_now = autostart_state(key_path, value_name)[0]
         self.row_autostart = SettingRow(
-            '开机自启动',
-            '登录 Windows 后自动打开启动器。\n不会自动启动列表内的条目。',
+            t('settings.autostart_title'), t('settings.autostart_desc'),
             checked=enabled_now, parent=self)
         self.row_autostart.toggled.connect(self._on_autostart_toggled)
         if sys.platform != 'win32':
             self.row_autostart.set_enabled_state(False)
 
-        # ---- 字体卡片 ----
+        # ---- 外观卡片：语言 + 字体搭配 + 字号 ----
+        # 三件都是"看起来怎样"，放同一张卡里；行为类开关（自启动）单独一行在上方。
         self.font_card = CardFrame(self)
-        card = QVBoxLayout(self.font_card)
+        card = QGridLayout(self.font_card)
         card.setContentsMargins(18, 14, 18, 14)
-        card.setSpacing(9)
+        card.setHorizontalSpacing(10)
+        card.setVerticalSpacing(9)
+        card.setColumnStretch(1, 1)
 
-        self.family_label = QLabel('字体搭配', self.font_card)
+        # 语言列表用**原生名称**（English / 日本語），不随界面语言翻译：
+        # 母语使用者找自己的语言，靠的是母语写法，不是当前界面的语言。
+        self.lang_label = QLabel(t('settings.language'), self.font_card)
+        self.lang_label.setObjectName('fontRowLabel')
+        set_ui_font(self.lang_label, 12, QFont.DemiBold, 'text', 0.3)
+
+        self.lang_combo = ThemedCombo(self.font_card)
+        set_ui_font(self.lang_combo, 13, QFont.Normal, 'text', 0.2)
+        for item in LANGUAGES:
+            self.lang_combo.addItem(item['name'], item['code'])
+        self.lang_combo.setCurrentIndex(Lang.index())
+        self.lang_combo.setToolTip(t('settings.language_tip'))
+
+        self.family_label = QLabel(t('settings.font_family'), self.font_card)
         self.family_label.setObjectName('fontRowLabel')
         set_ui_font(self.family_label, 12, QFont.DemiBold, 'text', 0.3)
 
-        self.family_combo = QComboBox(self.font_card)
+        self.family_combo = ThemedCombo(self.font_card)
         set_ui_font(self.family_combo, 13, QFont.Normal, 'text', 0.2)
-        for preset in FONT_PRESETS:
-            label = preset['name'] + ('（默认）' if preset['key'] == FONT_PRESETS[0]['key'] else '')
-            self.family_combo.addItem(label, preset['key'])
-            self.family_combo.setItemData(self.family_combo.count() - 1, preset['note'],
-                                          Qt.ToolTipRole)
-        self.family_combo.setCurrentIndex(
-            max(0, [p['key'] for p in FONT_PRESETS].index(FontPrefs.KEY)))
-
-        family_row = QHBoxLayout()
-        family_row.setContentsMargins(0, 0, 0, 0)
-        family_row.setSpacing(10)
-        family_row.addWidget(self.family_label, 0, Qt.AlignVCenter)
-        family_row.addWidget(self.family_combo, 1)
 
         self.family_note = QLabel('', self.font_card)
         self.family_note.setObjectName('fontNote')
@@ -2563,11 +2709,11 @@ class SettingsDialog(QDialog):
         # 宁可多一行高度（对话框会跟着长），也不要出现半截字。
         self.family_note.setWordWrap(True)
 
-        self.preview = QLabel('一键多启 · LaunchForge 2026', self.font_card)
+        self.preview = QLabel(t('settings.preview'), self.font_card)
         self.preview.setObjectName('fontPreview')
         set_ui_font(self.preview, 15, QFont.DemiBold, 'display', 0.3)
 
-        self.size_label = QLabel('字号', self.font_card)
+        self.size_label = QLabel(t('settings.font_size'), self.font_card)
         self.size_label.setObjectName('fontRowLabel')
         set_ui_font(self.size_label, 12, QFont.DemiBold, 'text', 0.3)
 
@@ -2578,24 +2724,24 @@ class SettingsDialog(QDialog):
         self.size_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         set_ui_font(self.size_value, 12, QFont.DemiBold, 'text', 0.2)
 
-        size_row = QHBoxLayout()
-        size_row.setContentsMargins(0, 0, 0, 0)
-        size_row.setSpacing(10)
-        size_row.addWidget(self.size_label, 0, Qt.AlignVCenter)
-        size_row.addWidget(self.size_slider, 1, Qt.AlignVCenter)
-        size_row.addWidget(self.size_value, 0, Qt.AlignVCenter)
-
-        card.addLayout(family_row)
-        card.addWidget(self.family_note)
-        card.addWidget(self.preview)
-        card.addLayout(size_row)
+        card.addWidget(self.lang_label, 0, 0, Qt.AlignVCenter)
+        card.addWidget(self.lang_combo, 0, 1)
+        card.addWidget(self.family_label, 1, 0, Qt.AlignVCenter)
+        card.addWidget(self.family_combo, 1, 1)
+        # 说明与预览跨满三列：跨两列会被右侧「13 px」那一列挤窄，
+        # 17px 字号下折行多出一行就压在边框上。
+        card.addWidget(self.family_note, 2, 0, 1, 3)
+        card.addWidget(self.preview, 3, 0, 1, 3)
+        card.addWidget(self.size_label, 4, 0, Qt.AlignVCenter)
+        card.addWidget(self.size_slider, 4, 1, Qt.AlignVCenter)
+        card.addWidget(self.size_value, 4, 2, Qt.AlignVCenter)
 
         self.hint = QLabel('', self)
         self.hint.setObjectName('settingsHint')
         set_ui_font(self.hint, 11, QFont.Normal, 'text')
         self.hint.setWordWrap(True)
 
-        self.btn_close = PillButton('关闭', compact=True)
+        self.btn_close = PillButton(t('settings.close'), compact=True)
         self.btn_close.clicked.connect(self._close_dialog)
 
         footer = QHBoxLayout()
@@ -2606,7 +2752,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
-        layout.addWidget(title)
+        layout.addWidget(self.title)
         layout.addWidget(self.row_autostart)
         layout.addWidget(self.font_card)
         layout.addWidget(self.hint)
@@ -2615,12 +2761,66 @@ class SettingsDialog(QDialog):
 
         # 信号放在控件就绪之后连，避免初始化期间触发一次多余的重建
         self.family_combo.currentIndexChanged.connect(self._on_family_changed)
+        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
         self.size_slider.valueChanged.connect(self._on_size_changed)
         self.size_slider.released.connect(self._on_size_released)
 
+        self._fill_family_combo()
         self._sync_font_controls()
+        self.row_autostart.sync_height(self._row_text_width())
         self._fit_height()
         self.refresh()
+
+    def _fill_family_combo(self):
+        """按当前语言重建「字体搭配」列表，并保持选中项不变（不触发落盘）。"""
+        current = FontPrefs.KEY
+        self.family_combo.blockSignals(True)
+        self.family_combo.clear()
+        for preset in FONT_PRESETS:
+            self.family_combo.addItem(t('font.%s.name' % preset['key']), preset['key'])
+            self.family_combo.setItemData(self.family_combo.count() - 1,
+                                          t('font.%s.note' % preset['key']),
+                                          Qt.ToolTipRole)
+        keys = [p['key'] for p in FONT_PRESETS]
+        self.family_combo.setCurrentIndex(keys.index(current) if current in keys else 0)
+        self.family_combo.blockSignals(False)
+
+    def _row_text_width(self):
+        """SettingRow 文字列的可用宽度：行宽 − 内边距 − 开关与间距。"""
+        return max(120, self.WIDTH - 36 - 20 - 16 - 12 - ToggleSwitch.WIDTH)
+
+    # ---- 语言：即时生效 ----
+    def _on_language_changed(self, index):
+        code = self.lang_combo.itemData(index)
+        if not code or code == Lang.CODE:
+            return
+        Lang.set(code)
+        log.info('界面语言切换为：%s（%s）', language_name(code), Lang.CODE)
+        self.retranslate()
+        if self._on_lang_changed is not None:
+            self._on_lang_changed()
+
+    def retranslate(self):
+        """
+        换语言后就地重建本面板的文案。
+
+        不关窗重开：用户正在面板里操作，窗口闪一下再出现会让人以为点错了东西。
+        """
+        self.setWindowTitle(t('app.settings_title'))
+        self.title.setText(t('settings.title'))
+        self.row_autostart.set_texts(t('settings.autostart_title'),
+                                     t('settings.autostart_desc'))
+        self.row_autostart.sync_height(self._row_text_width())
+        self.lang_label.setText(t('settings.language'))
+        self.lang_combo.setToolTip(t('settings.language_tip'))
+        self.family_label.setText(t('settings.font_family'))
+        self.size_label.setText(t('settings.font_size'))
+        self.preview.setText(t('settings.preview'))
+        self.btn_close.setText(t('settings.close'))
+        self._fill_family_combo()
+        self._sync_font_controls()
+        self.refresh()
+        self._fit_height()
 
     # ---- 字体：选择与即时生效 ----
     def _on_family_changed(self, index):
@@ -2643,7 +2843,7 @@ class SettingsDialog(QDialog):
     def _apply_fonts(self, persist):
         """重建本面板字体 → 同步控件尺寸 → 重算对话框高度 → （可选）落盘。"""
         restyle_widgets(self)
-        self.row_autostart.sync_height()
+        self.row_autostart.sync_height(self._row_text_width())
         self._sync_font_controls()
         self._fit_height()
         if persist:
@@ -2651,11 +2851,12 @@ class SettingsDialog(QDialog):
 
     def _sync_font_controls(self):
         """与字体相关的文案与几何，统一在这里对齐，避免改字号后标签被裁。"""
-        preset = FontPrefs.preset()
+        preset_key = FontPrefs.KEY
+        note = t('font.%s.note' % preset_key)
         if FontPrefs.available():
-            note = preset['note'] + ' · 本机可用'
+            note += t('settings.font_available')
         else:
-            note = preset['note'] + ' · 未安装，回退到 ' + FontPrefs.fallback_name()
+            note += t('settings.font_missing', name=FontPrefs.fallback_name())
         self.family_note.setText(note)
         self.family_note.setToolTip(note)
 
@@ -2675,6 +2876,12 @@ class SettingsDialog(QDialog):
         `heightForWidth` 必须显式问一次：说明文字会折行，`sizeHint()` 只按单行给高度，
         17px 字号下就会把最后一行压在边框外——这正是要避免的"越界"。
         """
+        # 说明行跨两列，QGridLayout 对"跨列 + 折行"的控件不会主动按 heightForWidth
+        # 给高度，17px 字号下会把最后一行裁掉。宽度是固定的，这里直接按可用宽度算一次。
+        avail = self.WIDTH - 36 - 36
+        if avail > 0:
+            self.family_note.setMinimumHeight(self.family_note.heightForWidth(avail))
+
         layout = self.layout()
         layout.activate()
         width = self.WIDTH - 36
@@ -2706,15 +2913,15 @@ class SettingsDialog(QDialog):
         exe_name = os.path.basename(_first_token_path(command)) or command
         if enabled and not same:
             self.hint.setStyleSheet('QLabel#settingsHint { color: #A8543C; background: transparent; }')
-            self.hint.setText('注册表指向旧路径，下次启动会自动改写')
+            self.hint.setText(t('settings.hint_legacy'))
         elif enabled:
             self.hint.setStyleSheet('QLabel#settingsHint { color: #4E7A5F; background: transparent; }')
-            self.hint.setText('已启用 · 登录后运行 %s' % exe_name)
+            self.hint.setText(t('settings.hint_enabled', name=exe_name))
         else:
             self.hint.setStyleSheet('QLabel#settingsHint { color: #8A8170; background: transparent; }')
-            self.hint.setText('未启用 · 开启后随 Windows 登录启动')
+            self.hint.setText(t('settings.hint_disabled'))
         # 完整命令行放悬停提示：小窗口里塞不下长路径，但需要时可查
-        self.hint.setToolTip('启动命令：\n%s' % command)
+        self.hint.setToolTip(t('settings.command_tip').format(command))
 
     def _on_autostart_toggled(self, checked):
         ok, err = set_autostart(checked, self._key_path, self._value_name)
@@ -2722,10 +2929,10 @@ class SettingsDialog(QDialog):
             # 写失败就回滚开关，绝不留下"看起来开了其实没开"的状态
             self.row_autostart.set_checked(not checked, emit=False)
             QMessageBox.warning(
-                self, '设置未生效',
-                '无法%s开机自启动：\n\n%s\n\n'
-                '常见原因：注册表被安全软件拦截、或用户没有当前账户的写入权限。'
-                % ('开启' if checked else '关闭', err))
+                self, t('settings.failed_title'),
+                t('settings.failed_body',
+                  action=t('settings.failed_on' if checked else 'settings.failed_off'),
+                  error=err))
         self.refresh()
 
 
@@ -2986,7 +3193,7 @@ class LauncherWindow(QMainWindow):
         log.info('启动 v%s | frozen=%s | exe=%s | 配置目录=%s | 日志=%s',
                  APP_VERSION, getattr(sys, 'frozen', False), sys.executable, CONFIG_DIR, LOG_FILE)
 
-        self.setWindowTitle('一键多启')
+        self.setWindowTitle(t('app.title'))
         self.setAcceptDrops(True)
 
         if getattr(sys, 'frozen', False):
@@ -3011,6 +3218,9 @@ class LauncherWindow(QMainWindow):
         }
 
         self.load_config()
+        # 标题要在 load_config 之后再设一次：语言是配置里读出来的，
+        # 上面那次 setWindowTitle 用的还是默认语言（否则英文用户会看到中文标题）。
+        self.setWindowTitle(t('app.title'))
 
         # 启动并发控制
         self._launch_thread = None
@@ -3019,14 +3229,14 @@ class LauncherWindow(QMainWindow):
         self._stop_launch = False
 
         # 预设行
-        self.preset_label = QLabel('预设方案')
+        self.preset_label = QLabel(t('main.preset'))
         set_ui_font(self.preset_label, 12, QFont.DemiBold, 'text', 0.4)
-        self.preset_combo = QComboBox()
+        self.preset_combo = ThemedCombo()
         self.preset_combo.setEditable(False)
         set_ui_font(self.preset_combo, 13, QFont.Normal, 'text', 0.2)
         self.preset_combo.setMinimumHeight(30)
-        self.btn_new_preset = PillButton('新建', compact=True)
-        self.btn_del_preset = PillButton('删除', compact=True)
+        self.btn_new_preset = PillButton(t('main.new'), compact=True)
+        self.btn_del_preset = PillButton(t('main.delete'), compact=True)
 
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(self.preset_label)
@@ -3069,12 +3279,12 @@ class LauncherWindow(QMainWindow):
         # 六项操作做成胶囊条，挂在圆的左右两侧——中间只留一颗圆，不与按钮堆在一起。
         # 文字不用 emoji：彩色图标会破坏象牙白 + 灰金的整体质感。
         # small_side 决定"朝外的那一侧收小圆角"：左列收左边、右列收右边，两列内外呼应。
-        self.btn_add = PillButton('添加程序', small_side='left')
-        self.btn_add_folder = PillButton('添加文件夹', small_side='left')
-        self.btn_add_path = PillButton('输入路径', small_side='left')
-        self.btn_del = PillButton('删除选中', small_side='right')
-        self.btn_log = PillButton('日志', small_side='right')
-        self.btn_settings = PillButton('设置', small_side='right')
+        self.btn_add = PillButton(t('main.add_program'), small_side='left')
+        self.btn_add_folder = PillButton(t('main.add_folder'), small_side='left')
+        self.btn_add_path = PillButton(t('main.add_path'), small_side='left')
+        self.btn_del = PillButton(t('main.remove_selected'), small_side='right')
+        self.btn_log = PillButton(t('main.log'), small_side='right')
+        self.btn_settings = PillButton(t('main.settings'), small_side='right')
 
         # 顺序即位置：第 1 个在上、第 3 个在下，中间那枚与圆心同高。
         # 宽度规则（REQ-009）：同一排左右等宽，且上排与下排取同一个值，
@@ -3147,10 +3357,11 @@ class LauncherWindow(QMainWindow):
             if self.preset_combo.count() > 0:
                 self.current_preset_name = self.preset_combo.currentText()
             else:
-                self.presets['默认方案'] = []
-                self.preset_combo.addItem('默认方案')
-                self.current_preset_name = '默认方案'
-                self.preset_combo.setCurrentText('默认方案')
+                default_name = t('main.default_preset')
+                self.presets[default_name] = []
+                self.preset_combo.addItem(default_name)
+                self.current_preset_name = default_name
+                self.preset_combo.setCurrentText(default_name)
 
         self.load_current_preset_list()
 
@@ -3223,6 +3434,28 @@ class LauncherWindow(QMainWindow):
         log.info('全局字体已应用：%s %dpx（重建字体 %d 处）',
                  FontPrefs.preset()['name'], FontPrefs.SIZE, restyled)
 
+    def _retranslate_default_preset(self):
+        """
+        「默认方案 / Default / 既定 / 預設方案」这个名字是**我们起的**，不是用户起的，
+        所以换语言时要跟着换；用户自己建（或改过名）的预设一概不动。
+
+        只处理"整份列表里只有一个预设"这种最常见情形——多预设时无法判断哪个该改名，
+        也不该替用户改数据。
+        """
+        if len(self.presets) != 1:
+            return
+        only = next(iter(self.presets))
+        target = t('main.default_preset')
+        if only not in DEFAULT_PRESET_NAMES or only == target:
+            return
+        self.presets = {target: self.presets[only]}
+        self.current_preset_name = target
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setItemText(0, target)
+        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.blockSignals(False)
+        log.info('默认预设名随语言改为：%s', target)
+
     def _get_all_pids(self):
         """返回当前系统所有进程PID的集合"""
         try:
@@ -3244,7 +3477,8 @@ class LauncherWindow(QMainWindow):
     def on_item_double_clicked(self, item):
         path = item.data(Qt.UserRole)
         if entry_kind(path) == 'missing':
-            QMessageBox.warning(self, '无法打开', '该路径已不存在：\n%s' % path)
+            QMessageBox.warning(self, t('msg.open_failed'),
+                                t('msg.path_missing', path=path))
             return
         try:
             result = launch_program(path)
@@ -3252,7 +3486,7 @@ class LauncherWindow(QMainWindow):
                 proc, resolved = result
                 self.launched_items.append((proc, resolved, self.current_preset_name, []))
         except Exception as e:
-            QMessageBox.warning(self, '启动失败', str(e))
+            QMessageBox.warning(self, t('msg.launch_failed'), str(e))
 
 
     def save_current_list_to_preset(self):
@@ -3283,12 +3517,13 @@ class LauncherWindow(QMainWindow):
         self.save_config()
 
     def new_preset_dialog(self):
-        name, ok = QInputDialog.getText(self, '新建预设', '请输入预设名称：')
+        name, ok = QInputDialog.getText(self, t('msg.new_preset_title'),
+                                        t('msg.new_preset_prompt'))
         if not ok or not name.strip():
             return
         name = name.strip()
         if name in self.presets:
-            QMessageBox.warning(self, '错误', '预设名称已存在！')
+            QMessageBox.warning(self, t('msg.error'), t('msg.preset_exists'))
             return
         self.save_current_list_to_preset()
         self.presets[name] = []
@@ -3298,10 +3533,10 @@ class LauncherWindow(QMainWindow):
 
     def delete_current_preset(self):
         if self.preset_combo.count() <= 1:
-            QMessageBox.information(self, '提示', '至少保留一个预设方案。')
+            QMessageBox.information(self, t('msg.notice'), t('msg.keep_one_preset'))
             return
-        reply = QMessageBox.question(self, '删除预设',
-                                     f'确定要删除预设“{self.current_preset_name}”吗？',
+        reply = QMessageBox.question(self, t('msg.delete_preset_title'),
+                                     t('msg.delete_preset_ask', name=self.current_preset_name),
                                      QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
@@ -3354,9 +3589,9 @@ class LauncherWindow(QMainWindow):
     def add_program_dialog(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            '选择要添加的程序或文件',
+            t('msg.choose_program'),
             self._start_dir(),
-            '程序 (*.exe *.lnk *.bat *.cmd);;所有文件 (*)'
+            t('msg.program_filter')
         )
         added = 0
         for p in paths:
@@ -3368,18 +3603,19 @@ class LauncherWindow(QMainWindow):
 
     def add_folder_dialog(self):
         folder = QFileDialog.getExistingDirectory(
-            self, '选择要添加的文件夹', self._start_dir(), QFileDialog.ShowDirsOnly)
+            self, t('msg.choose_folder'), self._start_dir(), QFileDialog.ShowDirsOnly)
         if not folder:
             return
         folder = normalize_input_path(folder)
         if not os.path.isdir(folder):
-            QMessageBox.warning(self, '无法添加', '所选目录不存在或不可访问：\n' + folder)
+            QMessageBox.warning(self, t('msg.cannot_add'),
+                                t('msg.folder_invalid', folder=folder))
             return
         if self.add_to_list(folder, update_preset=True):
             self.last_folder = folder
             self.save_config()
         else:
-            QMessageBox.information(self, '提示', '该文件夹已在列表中。')
+            QMessageBox.information(self, t('msg.notice'), t('msg.folder_exists'))
 
     def add_path_manually(self):
         """
@@ -3388,8 +3624,8 @@ class LauncherWindow(QMainWindow):
         default = self.last_folder if os.path.isdir(self.last_folder or '') else os.path.expanduser('~')
         text, ok = QInputDialog.getText(
             self,
-            '输入路径',
-            '程序 / 文件 / 文件夹的完整路径（支持 %USERPROFILE% 等环境变量）：',
+            t('msg.path_input_title'),
+            t('msg.path_input_prompt'),
             text=default
         )
         if not ok:
@@ -3398,10 +3634,11 @@ class LauncherWindow(QMainWindow):
         if not path:
             return
         if not os.path.exists(path):
-            QMessageBox.warning(self, '路径无效', '该路径不存在：\n%s' % path)
+            QMessageBox.warning(self, t('msg.path_invalid'),
+                                t('msg.path_not_exist', path=path))
             return
         if not self.add_to_list(path, update_preset=True):
-            QMessageBox.information(self, '提示', '该路径已在列表中。')
+            QMessageBox.information(self, t('msg.notice'), t('msg.path_exists'))
             return
         self.last_folder = path if os.path.isdir(path) else os.path.dirname(path)
         self.save_config()
@@ -3418,7 +3655,7 @@ class LauncherWindow(QMainWindow):
         self.save_config()
     def launch_all(self):
         if self._launching:
-            QMessageBox.information(self, '提示', '正在启动中，请稍候...')
+            QMessageBox.information(self, t('msg.notice'), t('msg.launching'))
             return
         if self.list_widget.count() == 0:
             return
@@ -3616,12 +3853,12 @@ class LauncherWindow(QMainWindow):
         for p in paths[:3]:
             name = os.path.basename(str(p).rstrip('\\/'))
             names.append(name or str(p))
-        label = '、'.join(names)
+        label = (', ' if Lang.CODE == 'en' else '、').join(names)
         if len(paths) > 3:
-            label += ' 等'
+            label += t('window.label_more')
         if len(paths) > 1:
-            label += '（%d 个标签）' % len(paths)
-        return label or ('窗口 %s' % win_info.get('hwnd'))
+            label += t('window.label_tabs', count=len(paths))
+        return label or t('window.label_unnamed', hwnd=win_info.get('hwnd'))
 
     def _folder_window_plan(self, folder_paths):
         """
@@ -3716,7 +3953,7 @@ class LauncherWindow(QMainWindow):
                 paths.append(p)
 
         if not paths:
-            QMessageBox.information(self, '提示', '列表为空，没有需要关闭的程序。')
+            QMessageBox.information(self, t('msg.notice'), t('msg.empty_list'))
             return
 
         # 文件夹条目单独处理：它们是"窗口"，不是"进程"
@@ -3781,9 +4018,9 @@ class LauncherWindow(QMainWindow):
 
         if not running and not closable and not mixed:
             QMessageBox.information(
-                self, '无需关闭',
-                '列表中的程序当前都没有在运行，也没有找到对应的文件夹窗口，已全部跳过。\n\n'
-                '共检查 %d 个程序、%d 个文件夹。' % (len(program_paths), len(folder_paths)))
+                self, t('close.nothing_title'),
+                t('close.nothing_body', programs=len(program_paths),
+                  folders=len(folder_paths)))
             return
 
         # 列表里有、但当前没打开的文件夹（用于结果说明，不参与关闭）
@@ -3803,32 +4040,32 @@ class LauncherWindow(QMainWindow):
                 is_document = os.path.splitext(p)[1].lower() not in ('.exe', '.com')
                 if is_document and not pids and img:
                     # 没有命令行证据，只能按关联程序关闭 —— 会连带关掉同程序的其它窗口
-                    label += '（将关闭 %s 的全部实例）' % img
+                    label += t('close.instances_suffix', name=img)
                 names.append(label)
             detail = '\n'.join('· ' + n for n in names[:12])
             if len(names) > 12:
-                detail += '\n· …等共 %d 个' % len(names)
-            sections.append('程序 %d 个（正在运行）：\n%s' % (len(running), detail))
+                detail += '\n' + t('close.more_items', count=len(names))
+            sections.append(t('close.section_programs', count=len(running), detail=detail))
         if closable:
             labels = ['· ' + self._window_label(w) for w in closable[:8]]
             if len(closable) > 8:
-                labels.append('· …等共 %d 个窗口' % len(closable))
-            sections.append('文件夹窗口 %d 个（整窗关闭）：\n%s' % (len(closable), '\n'.join(labels)))
+                labels.append(t('close.more_windows', count=len(closable)))
+            sections.append(t('close.section_folders', count=len(closable),
+                              detail='\n'.join(labels)))
 
-        text = '以下内容将被关闭：\n\n' + '\n\n'.join(sections)
+        text = t('close.ask_header') + '\n\n' + '\n\n'.join(sections)
         if mixed:
-            text += '\n\n另有 %d 个文件夹窗口混有列表外的标签，稍后单独询问。' % len(mixed)
+            text += t('close.mixed_hint', count=len(mixed))
         if skipped:
-            text += '\n\n另有 %d 项未运行或无法判定，将自动跳过。' % len(skipped)
+            text += t('close.skipped_hint', count=len(skipped))
         if unopened:
-            text += '\n其中 %d 个文件夹当前没有打开的窗口，自然跳过。' % len(unopened)
+            text += t('close.unopened_hint', count=len(unopened))
         if any(img and not pids and os.path.splitext(p)[1].lower() not in ('.exe', '.com')
                for p, img, pids in running):
-            text += ('\n\n注：标记了程序名的条目本身是文档（如 .drawio），没有独立进程，'
-                     '只能按"打开它的程序"关闭，因此会同时关闭该程序的其他窗口。')
-        text += '\n\n关闭后不可恢复，请确认已保存工作。'
+            text += t('close.doc_hint')
+        text += t('close.warning')
 
-        reply = QMessageBox.question(self, '确认关闭', text,
+        reply = QMessageBox.question(self, t('close.title'), text,
                                      QMessageBox.Yes | QMessageBox.No,
                                      QMessageBox.No)
         if reply != QMessageBox.Yes:
@@ -3842,25 +4079,22 @@ class LauncherWindow(QMainWindow):
             for w in mixed[:8]:
                 foreign = [os.path.basename(str(p).rstrip('\\/')) or str(p)
                            for p in w.get('foreign', []) if p]
-                shown = '、'.join(foreign[:3]) + ('…' if len(foreign) > 3 else '')
-                lines.append('· %s，另有 %d 个标签：%s' % (self._window_label(w), len(foreign), shown))
+                sep = ', ' if Lang.CODE == 'en' else '、'
+                shown = sep.join(foreign[:3]) + ('…' if len(foreign) > 3 else '')
+                lines.append(t('close.mixed_line', title=self._window_label(w),
+                               count=len(foreign), names=shown))
             if len(mixed) > 8:
-                lines.append('· …等共 %d 个窗口' % len(mixed))
+                lines.append(t('close.more_windows', count=len(mixed)))
 
             reply2 = QMessageBox.question(
-                self, '窗口含其他标签',
-                '以下 %d 个文件夹窗口里还有不属于本列表的标签：\n\n%s\n\n'
-                '整窗关闭会把这些标签一起关掉（它们的文件不会被删除）。\n'
-                '是否一并关闭？\n\n'
-                '「是」= 整窗关闭；「否」= 跳过这些窗口，其余内容照常关闭。'
-                % (len(mixed), '\n'.join(lines)),
+                self, t('close.mixed_title'),
+                t('close.mixed_body', count=len(mixed), lines='\n'.join(lines)),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No)
             if reply2 == QMessageBox.Yes:
                 close_mixed = mixed
             else:
-                skipped_windows = [(self._window_label(w), '含列表外标签，按你的选择跳过')
-                                   for w in mixed]
+                skipped_windows = [(self._window_label(w), t('close.mixed_skipped')) for w in mixed]
                 log.info('用户选择跳过混合标签窗口 %d 个', len(mixed))
 
         # 先中止可能仍在进行的启动流程，避免"一边启动一边关闭"
@@ -3879,9 +4113,8 @@ class LauncherWindow(QMainWindow):
         denied = sorted({r['image'] for r in results if r.get('denied') and r.get('image')})
         if denied and (remaining & {i.lower() for i in denied}):
             reply2 = QMessageBox.question(
-                self, '需要管理员权限',
-                '%d 个程序拒绝访问，通常是它们以管理员身份运行。\n'
-                '是否以管理员身份重试关闭？\n（系统会弹出 UAC 确认）' % len(denied),
+                self, t('close.denied_title'),
+                t('close.denied_body', count=len(denied)),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No)
             if reply2 == QMessageBox.Yes:
@@ -3899,8 +4132,8 @@ class LauncherWindow(QMainWindow):
                 continue
             image = (res.get('image') or '').lower()
             if image and image in remaining:
-                reason = '权限不足（需管理员）' if image in {d.lower() for d in denied} \
-                    else '进程仍在运行（可能被后台服务重启）'
+                reason = t('close.reason_denied') if image in {d.lower() for d in denied} \
+                    else t('close.reason_still_running')
                 failed.append((get_display_name(res['path']), reason))
                 log.warning('关闭失败：%s | image=%s | 原因=%s',
                             res['path'], res.get('image'), reason)
@@ -3916,7 +4149,7 @@ class LauncherWindow(QMainWindow):
                 log.info('文件夹窗口已关闭：%s | tabs=%s | %s',
                          self._window_label(w), len(w.get('paths') or []), note)
             else:
-                win_failed.append((self._window_label(w), '窗口未关闭（可能被拦截或无响应）'))
+                win_failed.append((self._window_label(w), t('close.window_failed')))
                 log.warning('文件夹窗口关闭失败：%s | hwnd=%s | %s',
                             self._window_label(w), w.get('hwnd'), note)
 
@@ -3925,26 +4158,25 @@ class LauncherWindow(QMainWindow):
 
         msg_parts = []
         if running:
-            msg_parts.append('已关闭 %d 个程序。' % closed)
+            msg_parts.append(t('close.result_programs', count=closed))
         if closable or close_mixed:
-            msg_parts.append('已关闭 %d 个文件夹窗口。' % win_closed)
-        msg = '\n'.join(msg_parts) if msg_parts else '没有内容被关闭。'
+            msg_parts.append(t('close.result_folders', count=win_closed))
+        msg = '\n'.join(msg_parts) if msg_parts else t('close.result_none')
 
         skip_total = len(skipped) + len(skipped_windows) + len(unopened)
         if skip_total:
-            msg += '\n跳过 %d 项（未运行 / 未打开窗口 / 无法判定 / 按你的选择跳过）。' % skip_total
+            msg += '\n' + t('close.result_skipped', count=skip_total)
 
         all_failed = failed + win_failed
         if all_failed:
-            msg += '\n\n关闭失败 %d 项：\n%s' % (
-                len(all_failed),
-                '\n'.join('· %s —— %s' % (n, r) for n, r in all_failed[:8]))
-            msg += '\n\n详细命令与返回码已写入日志：\n%s' % LOG_FILE
-            msg += '\n（可点击主界面「🗒 日志」打开所在目录）'
+            msg += '\n\n' + t('close.result_failed', count=len(all_failed),
+                               detail='\n'.join('· %s — %s' % (n, r) for n, r in all_failed[:8]))
+            msg += '\n\n' + t('close.result_log', path=LOG_FILE)
+            msg += '\n' + t('close.result_log_hint')
 
         log.info('关闭结束：程序成功 %d / 失败 %d；文件夹窗口成功 %d / 失败 %d；跳过 %d',
                  closed, len(failed), win_closed, len(win_failed), skip_total)
-        QMessageBox.information(self, '关闭结果', msg)
+        QMessageBox.information(self, t('close.result_title'), msg)
 
     @staticmethod
     def _pid_in_map(pid, proc_map):
@@ -4098,13 +4330,60 @@ class LauncherWindow(QMainWindow):
         字体同理：偏好只有 `FontPrefs` 一份，改完立刻回灌主窗口并落盘。
         """
         log.info('用户打开设置面板')
-        dialog = SettingsDialog(self, on_font_changed=self.on_font_changed)
+        dialog = SettingsDialog(self, on_font_changed=self.on_font_changed,
+                                on_language_changed=self.on_language_changed)
         dialog.exec_()
         log.info('设置面板已关闭')
 
     def on_font_changed(self):
         """设置面板改了字体：主窗口即时跟随，并写入配置（下次启动照样生效）。"""
         self.apply_font_prefs(save=True)
+
+    def on_language_changed(self):
+        """设置面板改了语言：主窗口就地换文案，并写入配置。"""
+        self.retranslate_ui()
+        self.save_config()
+
+    def retranslate_ui(self):
+        """
+        按当前语言重建主窗口文案（v1.14.0）。
+
+        和字体一样**不重建窗口**：`launched_items` 里记着文件类条目的承载 PID，
+        窗口一重建这份状态就没了，表现是"换完语言关不掉刚打开的文件"。
+        文案换完之后胶囊宽度会变（英文比中文长），所以还要重算列宽并把窗口
+        撑到新的最小尺寸——只放大不缩小，避免用户拖好的窗口突然缩一下。
+        """
+        self.setWindowTitle(t('app.title'))
+        self.preset_label.setText(t('main.preset'))
+        self.btn_new_preset.setText(t('main.new'))
+        self.btn_del_preset.setText(t('main.delete'))
+        self.btn_add.setText(t('main.add_program'))
+        self.btn_add_folder.setText(t('main.add_folder'))
+        self.btn_add_path.setText(t('main.add_path'))
+        self.btn_del.setText(t('main.remove_selected'))
+        self.btn_log.setText(t('main.log'))
+        self.btn_settings.setText(t('main.settings'))
+        self.taiji.invalidate_text()
+
+        self._retranslate_default_preset()
+
+        # 列表的悬停提示是"类型 + 路径"，类型名也要跟着换
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            item.setToolTip(entry_tooltip(item.data(Qt.UserRole)))
+
+        widths = self._pill_widths()
+        self.left_pills.set_widths(widths)
+        self.right_pills.set_widths(widths)
+        for btn in (self.btn_new_preset, self.btn_del_preset):
+            btn.updateGeometry()
+
+        layout = self.centralWidget().layout()
+        if layout is not None:
+            layout.activate()
+        hint = self.minimumSizeHint()
+        self.resize(max(self.width(), hint.width()), max(self.height(), hint.height()))
+        self.update()
 
 
     def open_log_dir(self):
@@ -4115,7 +4394,7 @@ class LauncherWindow(QMainWindow):
             log.info('用户打开日志目录：%s', LOG_DIR)
         except Exception as e:
             log.exception('打开日志目录失败')
-            QMessageBox.warning(self, '无法打开目录', '%s\n\n%s' % (LOG_DIR, e))
+            QMessageBox.warning(self, t('msg.open_dir_failed'), '%s\n\n%s' % (LOG_DIR, e))
 
 
 
@@ -4147,23 +4426,32 @@ class LauncherWindow(QMainWindow):
                 'last_folder': self.last_folder,
                 'font_key': FontPrefs.KEY,
                 'font_size': FontPrefs.SIZE,
+                'language': Lang.CODE,
             },
         }
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            QMessageBox.warning(self, '保存失败', f'无法写入配置文件：\n{e}')
+            QMessageBox.warning(self, t('msg.save_failed'),
+                                t('msg.save_failed_body', error=e))
     def load_config(self):
+        default_name = t('main.default_preset')
         if not os.path.exists(CONFIG_FILE):
-            self.presets = {'默认方案': []}
-            self.current_preset_name = '默认方案'
+            self.presets = {default_name: []}
+            self.current_preset_name = default_name
             self.last_folder = ''
             FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
             return
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            # 语言必须在任何 t() 之前恢复：预设名、首屏文案都要按它来
+            settings = data.get('settings', {})
+            if isinstance(settings, dict):
+                Lang.set(settings.get('language', Lang.CODE))
+            default_name = t('main.default_preset')
+
             raw_presets = data.get('presets', {})
             self.presets = {}
             for name, items in raw_presets.items():
@@ -4175,12 +4463,11 @@ class LauncherWindow(QMainWindow):
                         new_items.append(entry)
                 self.presets[name] = new_items
             if not self.presets:
-                self.presets = {'默认方案': []}
+                self.presets = {default_name: []}
             self.current_preset_name = data.get('last_used', list(self.presets.keys())[0])
             if self.current_preset_name not in self.presets:
                 self.current_preset_name = list(self.presets.keys())[0]
             # 旧配置里的 settings.auto_launch 一律忽略：本版本不存在自动启动行为
-            settings = data.get('settings', {})
             if isinstance(settings, dict):
                 self.last_folder = normalize_input_path(settings.get('last_folder', ''))
                 # 字体：必须在任何 ui_font() 调用之前恢复，否则首屏会用默认字体画一遍
@@ -4190,9 +4477,10 @@ class LauncherWindow(QMainWindow):
                 self.last_folder = ''
                 FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
         except Exception as e:
-            QMessageBox.warning(self, '加载失败', f'配置文件读取失败：\n{e}\n将使用默认设置。')
-            self.presets = {'默认方案': []}
-            self.current_preset_name = '默认方案'
+            QMessageBox.warning(self, t('msg.load_failed'),
+                                t('msg.load_failed_body', error=e))
+            self.presets = {default_name: []}
+            self.current_preset_name = default_name
             self.last_folder = ''
             FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
 
