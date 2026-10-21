@@ -2,6 +2,7 @@ import sys
 import os
 import csv
 import json
+import math
 import logging
 import logging.handlers
 import subprocess
@@ -21,7 +22,8 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
-    QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker, QFontDatabase
+    QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker, QFontDatabase,
+    QFontMetrics
 )
 
 try:
@@ -69,7 +71,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.12.0'
+APP_VERSION = '1.13.0'
 
 log = logging.getLogger('launchforge')
 
@@ -726,18 +728,39 @@ class TaijiLaunchButton(QWidget):
     run_requested = pyqtSignal()
     close_requested = pyqtSignal()
 
+    DIAMETER = 184                 # v1.13.0 起从 160 放大：字要能放进鱼身里
     # 每个半区三段色：高光 / 本色 / 暗部（偏沉稳的玉石绿与朱砂红，避免糖果色）
     RUN_COLORS = ('#A9ECC9', '#4CC38A', '#1D7350')
     CLOSE_COLORS = ('#F2605A', '#C1121F', '#6B0710')
     IDLE_COLORS = ('#EDEDED', '#CFCFCF', '#A6A6A6')
 
-    def __init__(self, diameter=160, parent=None):
+    # 盘面文字：幼圆是 Windows 自带的圆体，笔画收笔是圆的，比雅黑"可爱"；
+    # 缺了依次退到 MiSans → 当前界面字体，绝不退成宋体。
+    TAIJI_FONTS = ('幼圆', 'YouYuan', 'MiSans')
+
+    # 盘面文字色（常态 / 悬停）。暖金 + 深可可描边，不用纯白：
+    # 白字在玉绿与朱砂上都显得生硬，也和暖金面板没有关系；金色才和 UI 的金线呼应。
+    RUN_TEXT = ('#FFD79A', '#FFF0C4')
+    CLOSE_TEXT = ('#FFD79A', '#FFF0C4')
+    RUN_GLOW = '#FFF4D6'
+    CLOSE_GLOW = '#FFF4D6'
+    IDLE_TEXT = '#6F6F6F'
+    TEXT_OUTLINE = ('#5B2C00', 1.25)   # (颜色, 描边宽度)；None = 用"向下亮边"代替
+    TEXT_SCALE = 0.33                  # 字径 / 盘半径
+    TEXT_LEADING = 1.00                # 行距 / 字径
+    TEXT_OFFSET = 0.06                 # 字块与中线的距离 / 盘半径
+
+    def __init__(self, diameter=DIAMETER, parent=None):
         super().__init__(parent)
         self._d = int(diameter)
         self._margin = 16                     # 留给落影
         self._gap = 4                         # 两条鱼之间的缝隙（只透底色，不加投影）
         self._cache = None
+        self._text_family = self._pick_text_family()
+        self._text_cache_key = None
+        self._text_payload = None
         self.setFixedSize(self._d + self._margin * 2, self._d + self._margin * 2)
+
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip('左（绿）：一键启动当前预设　|　右（红）：关闭列表内的程序与文件夹窗口')
@@ -751,6 +774,26 @@ class TaijiLaunchButton(QWidget):
         # 比按钮略长：圆的面积大，太快会显得跳
         self._hover_anim.setDuration(130 if Theme.ANIMATIONS else 1)
         self._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # ---- 盘面字体 ----
+    def _pick_text_family(self):
+        """
+        盘面字体优先用圆体（幼圆），再退到界面当前字体。
+
+        为什么不跟随「设置 → 字体搭配」：盘面是插画，不是正文。
+        用户选衬线是想要"文气"的正文，不代表愿意让两颗按钮变成宋体。
+        """
+        installed = set(QFontDatabase().families())
+        for family in self.TAIJI_FONTS:
+            if family in installed:
+                return family
+        return _resolve_families('display')[0]
+
+    def _set_text_family(self, family):
+        """测试用：强制换一种盘面字体（同时清掉命中缓存）。"""
+        self._text_family = str(family)
+        self.update()
+
 
     # ---- 悬停强度（动画属性） ----
     def _get_hover_t(self):
@@ -968,40 +1011,176 @@ class TaijiLaunchButton(QWidget):
         p.drawEllipse(center, eye_r, eye_r)
         p.restore()
 
-    def _paint_text(self, p):
+    def _fish_span(self, side, y0, y1):
+        """
+        某个纵向区间内鱼身的可用横向区间（对若干采样行取交集）。
+
+        为什么不用"固定一个圆心 + 文字框"：S 形边界在 y=cy 处突然从 cx+ bulge 跳到
+        cx- bulge，固定框的下半截必然越过缝隙（17px 字号时最明显）。
+        按实际轮廓取交集，字才真正"长在鱼身里"。
+        """
         _big, _l, _r, _eyes, _er, radius, cx, cy = self._geometry()
-        font = QFont(self.font())
-        font.setWeight(QFont.DemiBold)
-        # 字号默认由盘面直径决定；跟随全局字号时只允许 ±16% 的浮动，
-        # 再多就会把字压到 S 形缝隙或盘沿上（圆盘是插画，不是排版容器）。
-        follow = max(0.94, min(1.16, FontPrefs.scale()))
-        font.setPixelSize(max(13, int(radius * 0.36 * follow)))
+        half_small = radius / 2.0
+        left, right = cx - radius, cx + radius
+        samples = 9
+        for i in range(samples):
+            y = y0 + (y1 - y0) * (i / float(samples - 1))
+            if abs(y - cy) > radius:
+                continue
+            outer = math.sqrt(max(0.0, radius * radius - (y - cy) ** 2))
+            # 上段小圆（圆心 cy-R/2）的右半在下半区当左边界，上半区当右边界，反之亦然
+            if y <= cy:
+                d = abs(y - (cy - half_small))
+            else:
+                d = abs(y - (cy + half_small))
+            bulge = math.sqrt(max(0.0, half_small * half_small - d * d))
+            if side == 'run':
+                left = max(left, cx - outer)
+                right = min(right, cx + bulge if y <= cy else cx - bulge)
+            else:
+                # 右鱼：上半区（细尾）左边界在 cx+bulge，下半区（鱼头）在 cx-bulge
+                left = max(left, cx + bulge if y <= cy else cx - bulge)
+                right = min(right, cx + outer)
+        return left, right
+
+    def _text_colors(self, side, enabled):
+        if not enabled:
+            return QColor(self.IDLE_TEXT), QColor(self.IDLE_TEXT)
+        base, hover = self.RUN_TEXT if side == 'run' else self.CLOSE_TEXT
+        return QColor(base), QColor(hover)
+
+    def _paint_char_glow(self, p, ch, box, color, strength):
+        """悬停时字周围的一圈柔光：8 个方向的低透明度副本叠出来（不打模糊）。"""
+        spread = 0.9 + 2.6 * strength
+        alpha = int(150 * strength)
+        p.setPen(QColor(color.red(), color.green(), color.blue(), alpha))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                       (-1, -1), (1, -1), (-1, 1), (1, 1)):
+            p.drawText(box.translated(dx * spread, dy * spread), Qt.AlignCenter, ch)
+
+    def _text_layout(self):
+        """
+        盘面文字排布（缓存）。
+
+        字号不是拍脑袋定的：从目标字号开始逐档缩小，直到"两字盒的四角都在鱼身内、
+        且离盘沿 ≥5px"。固定比例在 17px 全局字号下会顶到盘沿，靠这一步自适应最稳。
+        """
+        key = (self._d, round(FontPrefs.scale(), 2), self._text_family)
+        if self._text_cache_key == key:
+            return self._text_payload
+
+        _big, left_path, right_path, _eyes, eye_r, radius, cx, cy = self._geometry()
+        follow = max(0.94, min(1.08, FontPrefs.scale()))
+        target = max(14, int(round(radius * self.TEXT_SCALE * follow)))
+        pad = radius * 0.045
+        rim_keep = 5.0            # 字盒离盘沿至少留 5px，避免视觉上"贴着边"
+
+        payload = None
+        for px in range(target, 12, -1):
+            font = QFont(self._text_family)
+            font.setPixelSize(px)
+            font.setWeight(QFont.Bold)
+            fm = QFontMetrics(font)
+            line_h = min(px * self.TEXT_LEADING, radius * 0.37)
+            block = line_h * 2
+            sides, ok = [], True
+
+            for side, text, top in (
+                    ('run', '启动', cy - radius * self.TEXT_OFFSET - block),
+                    ('close', '关闭', cy + radius * self.TEXT_OFFSET)):
+                # 两字共用一条竖列：取两段鱼身的"公共可用区间"，再放在它的中线上。
+                # 逐字各自居中会左右错开，像排版没对齐；共用中线才像一组字。
+                lo, hi = -1e9, 1e9
+                for i in range(len(text)):
+                    y0 = top + i * line_h
+                    band_l, band_r = self._fish_span(side, y0 + 2.0, y0 + line_h - 2.0)
+                    lo = max(lo, band_l)
+                    hi = min(hi, band_r)
+                lo += pad
+                hi -= pad
+                # 给鱼眼让位：眼就在 cx 上方（左鱼）/ 下方（右鱼）
+                if side == 'run':
+                    hi = min(hi, cx - eye_r - 4.0)
+                else:
+                    lo = max(lo, cx + eye_r + 4.0)
+
+                advance = max(fm.horizontalAdvance(ch) for ch in text)
+                if hi - lo < advance + 4.0 or hi - lo < 8.0:
+                    ok = False
+                    break
+
+                box_w = advance + 4.0
+                box_cx = max(lo + box_w / 2.0, min(hi - box_w / 2.0, (lo + hi) / 2.0))
+                path = left_path if side == 'run' else right_path
+                items = []
+                for i, ch in enumerate(text):
+                    box = QRectF(box_cx - box_w / 2.0, top + i * line_h, box_w, line_h)
+                    for corner in (box.topLeft(), box.topRight(),
+                                   box.bottomLeft(), box.bottomRight()):
+                        if (not path.contains(corner)
+                                or math.hypot(corner.x() - cx, corner.y() - cy) > radius - rim_keep):
+                            ok = False
+                            break
+                    if not ok:
+                        break
+                    items.append((ch, box))
+                if not ok:
+                    break
+                sides.append((side, items))
+
+            if ok:
+                payload = (font, sides)
+                break
+
+        if payload is None:
+            # 极端字体（单字超宽）兜底：降到底线字号，至少还能画出来
+            fallback = QFont(self._text_family)
+            fallback.setPixelSize(14)
+            fallback.setWeight(QFont.Bold)
+            payload = (fallback, [])
+
+        self._text_cache_key = key
+        self._text_payload = payload
+        return payload
+
+    def _paint_text(self, p):
+        font, sides = self._text_layout()
         p.save()
         p.setFont(font)
-        fm = p.fontMetrics()
-        line_h = int(fm.height() * 1.02)
 
-        # 文字放在各自的"鱼身"里：左鱼靠左上、右鱼靠右下，
-        # 这样两字竖排不会压到中间的 S 形缝隙（鱼身在这个位置最宽）。
-        for side, text in (('run', '启动'), ('close', '关闭')):
+        for side, items in sides:
             enabled = self._run_enabled if side == 'run' else self._close_enabled
-            if side == 'run':
-                x, base_y = cx - radius * 0.42, cy - radius * 0.26
-            else:
-                x, base_y = cx + radius * 0.42, cy + radius * 0.26
-            for i, ch in enumerate(text):
-                offset = (i - (len(text) - 1) / 2.0) * line_h
-                box = QRectF(x - radius * 0.30, base_y + offset - line_h / 2.0,
-                             radius * 0.60, line_h)
-                # 浮雕字：先画右下暗影，再画亮面；禁用时改用深灰字，避免白字糊在浅灰上
-                if enabled:
-                    p.setPen(QColor(0, 0, 0, 112))
-                    p.drawText(box.translated(0.6, 1.2), Qt.AlignCenter, ch)
-                    p.setPen(QColor(255, 255, 255, 245))
+            base, hover = self._text_colors(side, enabled)
+            strength = self._hover_t if self._hover == side else 0.0
+            color = _mix_color(base, hover, strength) if enabled else base
+            glow = QColor(self.RUN_GLOW if side == 'run' else self.CLOSE_GLOW)
+
+            for ch, box in items:
+                if strength > 0.02:
+                    self._paint_char_glow(p, ch, box, glow, strength)
+
+                if self.TEXT_OUTLINE and enabled:
+                    # 描边字：先在 8 个方向铺一圈深色，再压上亮色字芯——
+                    # 盘面是彩色的，亮字没有深色描边会"飘"在颜色上。
+                    # 悬停时描边也稍微转暖，整颗字才像"亮起来"而不是只换了颜色。
+                    outline_color, width = self.TEXT_OUTLINE
+                    edge = _mix_color(QColor(outline_color), QColor('#8A4A12'), strength)
+                    p.setPen(edge)
+                    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                                   (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                        p.drawText(box.translated(dx * width, dy * width),
+                                   Qt.AlignCenter, ch)
                 else:
-                    p.setPen(QColor(255, 255, 255, 130))
-                    p.drawText(box.translated(0.6, 1.1), Qt.AlignCenter, ch)
-                    p.setPen(QColor(110, 110, 110, 215))
+                    # 向下 1px 的亮边：暗字压在彩色盘面上才有"压铸出来"的厚度
+                    p.setPen(QColor(255, 255, 255, 92 if enabled else 52))
+                    p.drawText(box.translated(0, 1.1), Qt.AlignCenter, ch)
+
+                # 字芯用竖向渐变（上浅下深），像糖块而不是一块平涂色
+                fill = QLinearGradient(box.topLeft(), box.bottomLeft())
+                fill.setColorAt(0.0, _mix_color(color, QColor('#FFFFFF'), 0.34))
+                fill.setColorAt(0.55, color)
+                fill.setColorAt(1.0, color.darker(110))
+                p.setPen(QPen(QBrush(fill), 1.0))
                 p.drawText(box, Qt.AlignCenter, ch)
         p.restore()
 
@@ -2900,7 +3079,7 @@ class LauncherWindow(QMainWindow):
         # 顺序即位置：第 1 个在上、第 3 个在下，中间那枚与圆心同高。
         # 宽度规则（REQ-009）：同一排左右等宽，且上排与下排取同一个值，
         # 这样左右成对一致、上下关于中线镜像，整体才是对称的。
-        self.taiji = TaijiLaunchButton(160)
+        self.taiji = TaijiLaunchButton()
         # 圆盘只吃家族、字号自绘（跟着盘面直径走），所以这里给 display 角色
         set_ui_font(self.taiji, 13, QFont.DemiBold, 'display')
         pills_height = self.taiji.height()
