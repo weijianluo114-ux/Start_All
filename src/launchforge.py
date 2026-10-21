@@ -15,7 +15,10 @@ from PyQt5.QtWidgets import (
     QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog,
     QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt, QTimer, QDir, QRectF, QPointF, QSize, pyqtSignal
+from PyQt5.QtCore import (
+    Qt, QTimer, QDir, QRectF, QPointF, QSize, pyqtSignal, QEvent,
+    pyqtProperty, QPropertyAnimation, QEasingCurve
+)
 from PyQt5.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
     QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker
@@ -39,6 +42,12 @@ except ImportError:
     HAS_WIN32GUI = False
     print('警告：未安装 pywin32，激活窗口功能不可用。请执行 pip install pywin32')
 
+try:
+    import winreg
+    HAS_WINREG = True
+except ImportError:                # 非 Windows 平台
+    HAS_WINREG = False
+
 
 
 
@@ -60,7 +69,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.9.1'
+APP_VERSION = '1.10.0'
 
 log = logging.getLogger('launchforge')
 
@@ -402,6 +411,17 @@ def _first_token_path(cmd):
     return cmd.split()[0] if cmd.split() else ''
 
 
+def _same_exe_path(a, b):
+    """比较两个可执行文件路径是否指向同一文件（忽略大小写、尾部反斜杠与环境变量差异）。"""
+    if not a or not b:
+        return False
+    try:
+        return os.path.normcase(os.path.normpath(os.path.expandvars(a))) == \
+            os.path.normcase(os.path.normpath(os.path.expandvars(b)))
+    except Exception:
+        return False
+
+
 def find_pids_by_commandline(path):
     """
     找出命令行里包含该文件路径的进程，返回 [(pid, 镜像名)]。
@@ -504,6 +524,114 @@ def launch_program(path):
     except Exception:
         pass
     return None
+
+
+# ------------------------- 开机自启动 -------------------------
+#
+# 实现方式：写 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run。
+# 选 HKCU 而不是 HKLM，是因为它**不需要管理员权限**——程序本身是绿色单文件，
+# 提权会触发 UAC 弹窗，得不偿失。
+#
+# 需要注意的一个坑：本项目的产物名带版本号（LaunchForge_vX.Y.Z.exe），
+# 升级后旧 exe 会被 clean_artifacts.py 删除，注册表里那条命令随即指向不存在的文件，
+# 开机自启动就静默失效了。因此提供 heal_autostart_path()：
+# 仅在"已开启且指向的文件确实不存在"时改写成当前程序；指向其它存在的副本时不动。
+
+AUTOSTART_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+AUTOSTART_NAME = 'LaunchForge'
+
+
+def autostart_command():
+    """写入 Run 键的命令行（带引号，防止路径含空格）。"""
+    if getattr(sys, 'frozen', False):
+        return '"%s"' % sys.executable
+    # 源码运行时用 pythonw.exe 拉起本文件，便于在开发机上验证同一套逻辑
+    script = os.path.abspath(__file__)
+    pyw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+    interp = pyw if os.path.exists(pyw) else sys.executable
+    return '"%s" "%s"' % (interp, script)
+
+
+def read_autostart(key_path=None, value_name=None):
+    """读注册表里的自启动命令；未设置或读取失败时返回 ''。"""
+    if sys.platform != 'win32' or not HAS_WINREG:
+        return ''
+    key_path = key_path or AUTOSTART_KEY
+    value_name = value_name or AUTOSTART_NAME
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as k:
+            value, _kind = winreg.QueryValueEx(k, value_name)
+            return str(value or '')
+    except FileNotFoundError:
+        return ''
+    except OSError:
+        log.debug('读取自启动项失败', exc_info=True)
+        return ''
+
+
+def autostart_state(key_path=None, value_name=None):
+    """
+    返回 (是否已启用, 注册表里的命令, 是否指向当前程序)。
+
+    "是否指向当前程序"按命令里第一个路径比较（忽略大小写与尾部反斜杠），
+    所以升级后版本号变化会被识别为"指向旧文件"，而不是当成已正确启用。
+    """
+    stored = read_autostart(key_path, value_name)
+    if not stored:
+        return False, '', False
+    return True, stored, _same_exe_path(_first_token_path(stored), _first_token_path(autostart_command()))
+
+
+def set_autostart(enabled, key_path=None, value_name=None):
+    """
+    写入 / 删除自启动项，返回 (成功, 失败原因)。
+
+    只改当前用户，不需要管理员权限。失败原因原样返回给界面显示，不静默吞掉——
+    与关闭流程"失败必须可见"的约定一致。
+    """
+    if sys.platform != 'win32' or not HAS_WINREG:
+        return False, '当前系统不支持注册表自启动项'
+    key_path = key_path or AUTOSTART_KEY
+    value_name = value_name or AUTOSTART_NAME
+    try:
+        if enabled:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, value_name, 0, winreg.REG_SZ, autostart_command())
+            log.info('已开启开机自启动：%s = %s', value_name, autostart_command())
+        else:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, value_name)
+                log.info('已关闭开机自启动：%s', value_name)
+            except FileNotFoundError:
+                pass            # 本来就没有，按"已关闭"处理
+        return True, ''
+    except OSError as e:
+        log.warning('修改自启动项失败：%s', e)
+        return False, str(e)
+
+
+def heal_autostart_path(key_path=None, value_name=None):
+    """
+    自启动项指向的文件已不存在时，改写成当前程序；返回新命令行（没改则返回 ''）。
+
+    只在"用户开过自启动 + 那条命令确实指向不存在的文件"时才动，
+    避免抢走用户另一份仍然存在的安装。
+    """
+    enabled, stored, same = autostart_state(key_path, value_name)
+    if not enabled or same:
+        return ''
+    stale = _first_token_path(stored)
+    if stale and os.path.exists(stale):
+        return ''
+    ok, err = set_autostart(True, key_path, value_name)
+    if not ok:
+        log.warning('自启动项自愈失败：%s', err)
+        return ''
+    log.info('自启动项指向的文件已不存在（%s），改写为当前程序', stale or stored)
+    return autostart_command()
 
 
 # ------------------------- 资源管理器窗口 -------------------------
@@ -1087,6 +1215,505 @@ class PillColumn(QWidget):
         super().resizeEvent(event)
 
 
+def _mix_color(a, b, t):
+    """按比例混合两色，用于开关在开/关之间的过渡。"""
+    t = max(0.0, min(1.0, t))
+    return QColor(int(a.red() + (b.red() - a.red()) * t),
+                  int(a.green() + (b.green() - a.green()) * t),
+                  int(a.blue() + (b.blue() - a.blue()) * t))
+
+
+class ToggleSwitch(QWidget):
+    """
+    胶囊形开关，纯 `QPainter` 绘制。
+
+    不用 `QCheckBox` 的原因：勾选框与暖色面板 + 象牙白胶囊的质感不搭，
+    而 QSS 无法给 QCheckBox 画出滑块、过渡与内阴影。手绘的好处是放大到 2 倍
+    （截图、高 DPI）依然清晰，改配色只改两个常量。
+    """
+
+    toggled = pyqtSignal(bool)
+
+    WIDTH, HEIGHT = 52, 28
+    ON_COLORS = ('#A9ECC9', '#3EAE76')      # 与圆盘左半（启动）同源
+    OFF_COLORS = ('#E7E1D4', '#CBC3B2')
+
+    def __init__(self, checked=False, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self._hover = False
+        self._pressed = False
+        self._pos = 1.0 if checked else 0.0
+
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        self._anim = QPropertyAnimation(self, b'knob', self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # ---- 滑块位置（0=关，1=开），由动画驱动 ----
+    def _get_knob(self):
+        return self._pos
+
+    def _set_knob(self, value):
+        self._pos = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    knob = pyqtProperty(float, _get_knob, _set_knob)
+
+    def isChecked(self):
+        return self._checked
+
+    def set_hover(self, hovered):
+        hovered = bool(hovered)
+        if hovered != self._hover:
+            self._hover = hovered
+            self.update()
+
+    def setChecked(self, checked, animate=True):
+        """改状态但**不发信号**：由 SettingRow 统一发一次，避免重复写注册表。"""
+        checked = bool(checked)
+        if checked == self._checked:
+            return
+        self._checked = checked
+        target = 1.0 if checked else 0.0
+        self._anim.stop()
+        if animate and self.isVisible():
+            self._anim.setStartValue(self._pos)
+            self._anim.setEndValue(target)
+            self._anim.start()
+        else:
+            self._set_knob(target)
+        self.update()
+
+    def toggle(self):
+        self.setChecked(not self._checked)
+        self.toggled.emit(self._checked)
+
+    # ---- 绘制 ----
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0)
+        t = self._pos
+        top = _mix_color(QColor(self.OFF_COLORS[0]), QColor(self.ON_COLORS[0]), t)
+        bottom = _mix_color(QColor(self.OFF_COLORS[1]), QColor(self.ON_COLORS[1]), t)
+        if self._hover:
+            top, bottom = top.lighter(107), bottom.lighter(107)
+        if self._pressed:
+            top, bottom = top.darker(108), bottom.darker(108)
+
+        # 1) 轨道
+        path = QPainterPath()
+        path.addRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)
+        track = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        track.setColorAt(0.0, top)
+        track.setColorAt(1.0, bottom)
+        p.fillPath(path, QBrush(track))
+
+        # 2) 内阴影：上沿压暗，做出凹槽感
+        shade = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        shade.setColorAt(0.0, QColor(0, 0, 0, 46))
+        shade.setColorAt(0.55, QColor(0, 0, 0, 0))
+        p.fillPath(path, QBrush(shade))
+
+        # 3) 悬浮环：贴合圆盘"外圈上亮下暗"的语言
+        if self._hover:
+            ring = QColor(76, 195, 138, 125) if t > 0.5 else QColor(176, 149, 92, 115)
+            pen = QPen(ring)
+            pen.setWidthF(1.6)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect.adjusted(-1.0, -1.0, 1.0, 1.0),
+                              rect.height() / 2.0 + 1.0, rect.height() / 2.0 + 1.0)
+
+        # 4) 轮廓
+        pen = QPen(_mix_color(QColor('#BEAD86'), QColor('#2E8F63'), t))
+        pen.setWidthF(1.1)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+        # 5) 滑块（带落影，向右移动时不做缩放，避免"跳动"）
+        radius = rect.height() / 2.0 - 3.2
+        cx = rect.left() + rect.height() / 2.0 + t * (rect.width() - rect.height())
+        cy = rect.center().y() + 0.4
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 42))
+        p.drawEllipse(QPointF(cx, cy + 1.1), radius, radius)
+
+        knob = QLinearGradient(QPointF(cx, cy - radius), QPointF(cx, cy + radius))
+        knob.setColorAt(0.0, QColor('#FFFFFF'))
+        knob.setColorAt(1.0, QColor('#F4EFE3'))
+        p.setBrush(QBrush(knob))
+        pen = QPen(QColor(0, 0, 0, 28))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
+
+        # 6) 焦点框：键盘操作时可见，鼠标操作时不干扰视觉
+        if self.hasFocus():
+            pen = QPen(QColor(76, 195, 138, 150) if t > 0.5 else QColor(140, 125, 90, 140))
+            pen.setWidthF(1.0)
+            pen.setStyle(Qt.DotLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 4, 4)
+        p.end()
+
+    # ---- 交互 ----
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pressed = True
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._pressed:
+            self._pressed = False
+            self.update()
+            if self.rect().contains(event.pos()):
+                self.toggle()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event):
+        self.set_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.set_hover(False)
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.toggle()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class SettingRow(QWidget):
+    """
+    设置项卡片：左侧标题 + 说明，右侧开关。
+
+    **整行可点**——命中面积比只点开关大得多，不必精确瞄准 52×28。
+    悬停时有四处同时变化：底色提亮、边框转金、左侧状态竖条加长、开关出现发光环。
+    四处叠加是为了在小尺寸下也能一眼看出"当前指向哪一项"。
+    """
+
+    toggled = pyqtSignal(bool)
+
+    HEIGHT = 90
+
+    def __init__(self, title, description='', checked=False, with_switch=True, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self._hover = False
+        self._enabled = True
+
+        self.setFixedHeight(self.HEIGHT)
+        self.setFocusPolicy(Qt.StrongFocus if with_switch else Qt.NoFocus)
+        self.setCursor(Qt.PointingHandCursor if with_switch else Qt.ArrowCursor)
+
+        title_font = QFont()
+        title_font.setFamily('Microsoft YaHei UI')
+        title_font.setPixelSize(14)
+        title_font.setBold(True)
+
+        self.title_label = QLabel(title, self)
+        self.title_label.setFont(title_font)
+        self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        desc_font = QFont()
+        desc_font.setFamily('Microsoft YaHei UI')
+        desc_font.setPixelSize(11)
+
+        self.desc_label = QLabel(description, self)
+        self.desc_label.setFont(desc_font)
+        self.desc_label.setWordWrap(True)
+        self.desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.switch = ToggleSwitch(self._checked, self) if with_switch else None
+        if self.switch is not None:
+            self.switch.toggled.connect(self._on_switch_toggled)
+            # 鼠标移到开关上时，字符串标签那份 hover 会断，靠事件过滤器补回来
+            self.switch.installEventFilter(self)
+
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(5)
+        left.addWidget(self.title_label)
+        left.addWidget(self.desc_label)
+        left.addStretch(1)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(20, 14, 16, 14)
+        row.setSpacing(12)
+        row.addLayout(left, 1)
+        if self.switch is not None:
+            row.addWidget(self.switch, 0, Qt.AlignVCenter)
+
+        self._apply_text_colors()
+
+    # ---- 状态 ----
+    def is_checked(self):
+        return self._checked
+
+    def set_checked(self, checked, emit=True):
+        checked = bool(checked)
+        if checked == self._checked:
+            if self.switch is not None:
+                self.switch.setChecked(checked, animate=False)
+            return
+        self._checked = checked
+        if self.switch is not None:
+            self.switch.setChecked(checked, animate=emit and self.isVisible())
+        self.update()
+        if emit:
+            self.toggled.emit(checked)
+
+    def set_enabled_state(self, enabled):
+        """整行禁用：文字转浅、开关置灰，点击不生效（用于平台不支持的场景）。"""
+        self._enabled = bool(enabled)
+        self.setCursor(Qt.PointingHandCursor if self._enabled else Qt.ForbiddenCursor)
+        self.setFocusPolicy(Qt.StrongFocus if self._enabled else Qt.NoFocus)
+        if self.switch is not None:
+            self.switch.setEnabled(self._enabled)
+        self._apply_text_colors()
+        self.update()
+
+    def _on_switch_toggled(self, checked):
+        if checked == self._checked:
+            return
+        self._checked = checked
+        self.update()
+        self.toggled.emit(checked)
+
+    def _set_hover(self, hovered):
+        hovered = bool(hovered and self._enabled)
+        if hovered == self._hover:
+            return
+        self._hover = hovered
+        if self.switch is not None:
+            self.switch.set_hover(hovered)
+        self._apply_text_colors()
+        self.update()
+
+    def _apply_text_colors(self):
+        if not self._enabled:
+            title, desc = '#9C9382', '#ADA493'
+        elif self._hover:
+            title, desc = '#1F1B15', '#6E6553'
+        else:
+            title, desc = '#34302A', '#857B69'
+        self.title_label.setStyleSheet('color: %s; background: transparent;' % title)
+        self.desc_label.setStyleSheet('color: %s; background: transparent;' % desc)
+
+    # ---- 绘制 ----
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 卡片比行高矮 4px，底部留出投影空间（投影只在悬停时出现）
+        rect = QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 5.0)
+        radius = 10.0
+
+        if self._hover and self._enabled:
+            for dy, alpha in ((3.0, 14), (5.5, 9)):
+                sh = QPainterPath()
+                sh.addRoundedRect(rect.adjusted(2.5, dy - 1.0, -2.5, dy), radius, radius)
+                p.fillPath(sh, QBrush(QColor(92, 74, 40, alpha)))
+
+        bg = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        if not self._enabled:
+            bg.setColorAt(0.0, QColor('#F5F1E9'))
+            bg.setColorAt(1.0, QColor('#EFEAE1'))
+        elif self._hover:
+            bg.setColorAt(0.0, QColor('#FFFFFF'))
+            bg.setColorAt(1.0, QColor('#FDF8EE'))
+        else:
+            bg.setColorAt(0.0, QColor('#FFFDF8'))
+            bg.setColorAt(1.0, QColor('#F8F2E6'))
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        p.fillPath(path, QBrush(bg))
+
+        edge = QColor('#B79A5E') if self._hover else QColor('#E2DACB')
+        pen = QPen(edge)
+        pen.setWidthF(1.6 if self._hover else 1.0)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+        # 左侧状态竖条：开启绿、关闭暖灰；悬停时上下各延伸 4px 并加粗，作为"当前项"指示
+        if not self._enabled:
+            bar_color = QColor('#DCD3C1')
+        else:
+            bar_color = QColor('#4CC38A') if self._checked else QColor('#D6CCB8')
+        inset = 12.0 if self._hover else 16.0
+        bar_width = 3.6 if self._hover else 3.0
+        bar = QRectF(8.0, inset, bar_width, rect.height() - inset * 2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(bar_color)
+        p.drawRoundedRect(bar, bar_width / 2.0, bar_width / 2.0)
+
+        # 悬停时顶部再加一道内高光，卡片才有"被托起"的感觉
+        if self._hover:
+            hal = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + 16))
+            hal.setColorAt(0.0, QColor(255, 255, 255, 165))
+            hal.setColorAt(1.0, QColor(255, 255, 255, 0))
+            inner = QPainterPath()
+            inner.addRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), radius - 1.0, radius - 1.0)
+            p.fillPath(inner, QBrush(hal))
+        p.end()
+
+    # ---- 交互 ----
+    def mouseReleaseEvent(self, event):
+        if self._enabled and self.switch is not None and event.button() == Qt.LeftButton:
+            if self.rect().contains(event.pos()):
+                self.set_checked(not self._checked)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self._enabled and self.switch is not None and \
+                event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.set_checked(not self._checked)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def enterEvent(self, event):
+        self._set_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_hover(False)
+        super().leaveEvent(event)
+
+    def eventFilter(self, obj, event):
+        if self.switch is not None and obj is self.switch:
+            if event.type() == QEvent.Enter:
+                self._set_hover(True)
+            elif event.type() == QEvent.Leave:
+                self._set_hover(self.underMouse())
+        return super().eventFilter(obj, event)
+
+
+class SettingsDialog(QDialog):
+    """
+    设置面板（v1.10.0 起）。
+
+    刻意做小（400×250）：只放真正会改变行为的开关，不摆"看起来丰富但不生效"的项。
+    没有「保存」按钮——开关改动即时写入，失败会回滚开关并说明原因；
+    因此面板本身不持有状态，每次都从注册表现读，外部改动也能如实反映。
+    """
+
+    WIDTH = 400
+    HEIGHT = 224
+
+    def __init__(self, parent=None, key_path=None, value_name=None):
+        super().__init__(parent)
+        self._key_path = key_path
+        self._value_name = value_name
+
+        self.setObjectName('settingsPanel')
+        # 标题栏写项目名，面板内标题写「设置」——避免两处都是"设置"造成重复
+        self.setWindowTitle('一键多启 · 设置')
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+        self.setWindowFlags((self.windowFlags() | Qt.WindowCloseButtonHint)
+                            & ~Qt.WindowContextHelpButtonHint)
+        self.setStyleSheet("""
+            QDialog#settingsPanel { background-color: #EDE7DB; }
+            QLabel#settingsTitle { color: #2E2A24; background: transparent; }
+            QLabel#settingsHint { color: #8A8170; background: transparent; }
+        """)
+
+        title = QLabel('设置', self)
+        title.setObjectName('settingsTitle')
+        title_font = QFont()
+        title_font.setFamily('Microsoft YaHei UI')
+        title_font.setPixelSize(17)
+        title_font.setBold(True)
+        title.setFont(title_font)
+
+        enabled_now = autostart_state(key_path, value_name)[0]
+        self.row_autostart = SettingRow(
+            '开机自启动',
+            '登录 Windows 后自动打开启动器。\n不会自动启动列表内的条目。',
+            checked=enabled_now, parent=self)
+        self.row_autostart.toggled.connect(self._on_autostart_toggled)
+        if sys.platform != 'win32':
+            self.row_autostart.set_enabled_state(False)
+
+        self.hint = QLabel('', self)
+        self.hint.setObjectName('settingsHint')
+        hint_font = QFont()
+        hint_font.setFamily('Microsoft YaHei UI')
+        hint_font.setPixelSize(11)
+        self.hint.setFont(hint_font)
+        self.hint.setWordWrap(False)
+
+        self.btn_close = PillButton('关闭', compact=True)
+        self.btn_close.clicked.connect(self.accept)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.addStretch(1)
+        footer.addWidget(self.btn_close)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        layout.addWidget(title)
+        layout.addWidget(self.row_autostart)
+        layout.addWidget(self.hint)
+        layout.addStretch(1)
+        layout.addLayout(footer)
+
+        self.refresh()
+
+    # ---- 状态同步 ----
+    def refresh(self):
+        """按注册表的真实状态刷新开关与提示文字。"""
+        enabled, stored, same = autostart_state(self._key_path, self._value_name)
+        self.row_autostart.set_checked(enabled, emit=False)
+        command = autostart_command()
+        exe_name = os.path.basename(_first_token_path(command)) or command
+        if enabled and not same:
+            self.hint.setStyleSheet('QLabel#settingsHint { color: #A8543C; background: transparent; }')
+            self.hint.setText('注册表指向旧路径，下次启动会自动改写')
+        elif enabled:
+            self.hint.setStyleSheet('QLabel#settingsHint { color: #4E7A5F; background: transparent; }')
+            self.hint.setText('已启用 · 登录后运行 %s' % exe_name)
+        else:
+            self.hint.setStyleSheet('QLabel#settingsHint { color: #8A8170; background: transparent; }')
+            self.hint.setText('未启用 · 开启后随 Windows 登录启动')
+        # 完整命令行放悬停提示：小窗口里塞不下长路径，但需要时可查
+        self.hint.setToolTip('启动命令：\n%s' % command)
+
+    def _on_autostart_toggled(self, checked):
+        ok, err = set_autostart(checked, self._key_path, self._value_name)
+        if not ok:
+            # 写失败就回滚开关，绝不留下"看起来开了其实没开"的状态
+            self.row_autostart.set_checked(not checked, emit=False)
+            QMessageBox.warning(
+                self, '设置未生效',
+                '无法%s开机自启动：\n\n%s\n\n'
+                '常见原因：注册表被安全软件拦截、或用户没有当前账户的写入权限。'
+                % ('开启' if checked else '关闭', err))
+        self.refresh()
+
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1257,6 +1884,15 @@ class LauncherWindow(QMainWindow):
 
         self.btn_log.clicked.connect(self.open_log_dir)
         self.btn_settings.clicked.connect(self.open_settings)
+
+        # 自启动项可能指向已被清理的旧版本（产物名带版本号，升级后旧 exe 会被删）。
+        # 这里只做"明确已失效"的自愈，指向其它仍存在的副本时不动，避免抢走用户的另一份安装。
+        try:
+            healed = heal_autostart_path()
+            if healed:
+                log.info('开机自启动项已更新到当前版本：%s', healed)
+        except Exception:
+            log.exception('检查开机自启动项时出错（不影响启动器正常使用）')
 
         # 说明：不在此处做任何自动启动。启动器打开时只呈现界面，
         # 必须由用户点击「🚀 一键启动」才会运行列表内的条目。
@@ -2128,16 +2764,15 @@ class LauncherWindow(QMainWindow):
 
     def open_settings(self):
         """
-        设置入口（占位，未实现功能）。
+        打开设置面板。
 
-        按需求先留出按钮与调用路径，本版点击只说明"尚未实现"，
-        不做任何副作用——以后接设置面板时只改这个方法体即可。
+        面板本身不保存状态：每次打开都从注册表现读，开关改动即时写入。
+        这样即使有人手动删掉 Run 键，界面也不会残留"已开启"的假象。
         """
-        log.info('用户点击「设置」（本版尚未实现）')
-        QMessageBox.information(
-            self, '设置',
-            '设置面板尚未实现。\n\n'
-            '这个入口本版只是预留位置，点击不会修改任何配置。')
+        log.info('用户打开设置面板')
+        dialog = SettingsDialog(self)
+        dialog.exec_()
+        log.info('设置面板已关闭')
 
 
     def open_log_dir(self):

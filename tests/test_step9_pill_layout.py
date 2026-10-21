@@ -10,7 +10,7 @@
   4. 圆心 y == 两列中心 y
   5. 两列与圆之间有空隙但不脱节
   6. 圆角：外侧收小、内侧保持大圆角；边框无单独上色（无白色上沿）
-  7. 「设置」点了只弹"尚未实现"，不产生任何副作用
+  7. 「设置」点开设置面板，且打开动作本身不改配置
   8. 宏功能确实已封存
 
 运行：python tests/test_step9_pill_layout.py
@@ -128,18 +128,35 @@ for label, column, small_side in (('左列', win.left_pills, 'left'),
 print("[6] 圆角：左列 左小(r=%d)/右大(r=%d)，右列反之；边框无单独上色 ✅"
       % (launchforge.PillButton.SMALL_RADIUS, launchforge.PillButton.HEIGHT // 2))
 
-# ---------- 7. 设置按钮只是占位 ----------
+# ---------- 7. 设置入口打开面板（v1.10.0 起不再是"尚未实现"） ----------
+class FakeSettingsDialog:
+    """替掉真实模态面板：只要确认被打开，且打开本身不改配置。"""
+    instances = []
+
+    def __init__(self, parent=None):
+        FakeSettingsDialog.instances.append(parent)
+
+    def exec_(self):
+        return 0
+
+
+real_dialog = launchforge.SettingsDialog
+launchforge.SettingsDialog = FakeSettingsDialog
 FakeMessageBox.calls.clear()
 cfg = launchforge.CONFIG_FILE
 before = open(cfg, 'rb').read() if os.path.exists(cfg) else b''
-win.btn_settings.click()
-app.processEvents()
+try:
+    win.btn_settings.click()
+    app.processEvents()
+finally:
+    launchforge.SettingsDialog = real_dialog
 titles = [c[1] for c in FakeMessageBox.calls]
-print("[7] 点「设置」→ 弹窗 %s" % titles)
-assert '设置' in titles, "应弹出设置提示"
-assert '尚未实现' in FakeMessageBox.calls[0][2], "应说明尚未实现"
+print("[7] 点「设置」→ 打开面板 %d 次，弹窗 %s"
+      % (len(FakeSettingsDialog.instances), titles))
+assert len(FakeSettingsDialog.instances) == 1, "应打开设置面板"
+assert not FakeMessageBox.calls, "不应再弹占位提示"
 after = open(cfg, 'rb').read() if os.path.exists(cfg) else b''
-assert before == after, "占位按钮不应改动配置"
+assert before == after, "打开设置不应改动配置"
 
 # ---------- 8. 宏确实被封存 ----------
 print("[8] MacroRecorderDialog=%s | global_macro=%s | legacy 已加载=%s"
