@@ -14,6 +14,7 @@
 | 太极圆盘 | 左半浅绿=一键启动、右半鲜血红=关闭全部；3D 浮雕 + 盘心发光，启动中绿鱼自动置灰 |
 | 圆侧胶囊操作区 | 六项操作分列圆盘两侧，胶囊长度按字数变化；长条靠上下、短条靠中间 |
 | 设置面板 | 小面板（400×224），「开机自启动」开关即时生效；悬停有提亮、金边与投影反馈 |
+| 字体与动效 | 三级字重 + 按角色选族；悬停 110ms、按下 90ms 逐帧过渡，尊重系统「动画效果」开关 |
 | 预设方案 | 多套方案自由切换，改动即时保存，无「保存」按钮 |
 | 一键启动 | 按列表顺序启动全部条目；程序并发、文件夹随后打开 |
 | 安全关闭 | 先确认 → 检测是否真的在运行 → 逐项关闭 → 复查 → 汇总；**未运行的自动跳过** |
@@ -97,7 +98,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.10.0 ^
+    --name LaunchForge_v1.11.0 ^
     src\launchforge.py
 ```
 
@@ -116,6 +117,7 @@ python test_step8_taiji_button.py
 python test_step9_pill_layout.py
 python test_step10_document_entries.py
 python test_step11_settings_autostart.py
+python test_step12_typography_motion.py
 pythonw test_step6_no_console_flash.py
 ```
 

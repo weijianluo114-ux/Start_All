@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QWidget, QMessageBox,
     QAbstractItemView, QComboBox, QLabel, QInputDialog, QMenu, QDialog,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect, QStyledItemDelegate
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QDir, QRectF, QPointF, QSize, pyqtSignal, QEvent,
@@ -21,7 +21,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QPainter, QColor, QBrush, QPen, QFont,
-    QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker
+    QLinearGradient, QRadialGradient, QPainterPath, QPainterPathStroker, QFontDatabase
 )
 
 try:
@@ -69,7 +69,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.10.0'
+APP_VERSION = '1.11.0'
 
 log = logging.getLogger('launchforge')
 
@@ -742,16 +742,42 @@ class TaijiLaunchButton(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip('左（绿）：一键启动当前预设　|　右（红）：关闭列表内的程序与文件夹窗口')
         self._hover = None
+        self._hover_t = 0.0                   # 悬停强度 0→1，驱动光圈与外圈高亮
         self._pressed = None
         self._run_enabled = True
         self._close_enabled = True
+
+        self._hover_anim = QPropertyAnimation(self, b'hover_glow', self)
+        # 比按钮略长：圆的面积大，太快会显得跳
+        self._hover_anim.setDuration(130 if Theme.ANIMATIONS else 1)
+        self._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # ---- 悬停强度（动画属性） ----
+    def _get_hover_t(self):
+        return self._hover_t
+
+    def _set_hover_t(self, value):
+        self._hover_t = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    hover_glow = pyqtProperty(float, _get_hover_t, _set_hover_t)
+
+    def _set_hover_side(self, side):
+        """切换悬停半区，并把强度平滑推到 1 / 0（而不是瞬间切换）。"""
+        if side == self._hover:
+            return
+        self._hover = side
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover_t)
+        self._hover_anim.setEndValue(1.0 if side else 0.0)
+        self._hover_anim.start()
 
     # ------------------------- 对外接口 -------------------------
 
     def set_run_enabled(self, enabled):
         self._run_enabled = bool(enabled)
         if not self._run_enabled and self._hover == 'run':
-            self._hover = None
+            self._set_hover_side(None)
         self.update()
 
     def is_run_enabled(self):
@@ -838,7 +864,10 @@ class TaijiLaunchButton(QWidget):
         if enabled and self._pressed == side:
             light, main, dark = (c.darker(116) for c in (light, main, dark))
         elif enabled and self._hover == side:
-            light, main, dark = (c.lighter(110) for c in (light, main, dark))
+            # 110% 是终点，按动画强度插值，避免悬停瞬间"跳"一下
+            factor = 100 + int(10 * self._hover_t)
+            light, main, dark = (c.lighter(factor) if factor > 100 else c
+                                 for c in (light, main, dark))
         return enabled, light, main, dark
 
     def _paint_shadow(self, p, big):
@@ -903,8 +932,12 @@ class TaijiLaunchButton(QWidget):
         p.drawPath(path)
 
         # 5) 悬停 / 按下：再补一圈细边，强化"按得动"的手感
-        if enabled and (self._hover == side or self._pressed == side):
-            rim = QColor(255, 255, 255, 120) if self._pressed != side else QColor(0, 0, 0, 80)
+        hover_here = self._hover_t if self._hover == side else 0.0
+        if enabled and (hover_here > 0.01 or self._pressed == side):
+            if self._pressed == side:
+                rim = QColor(0, 0, 0, 80)
+            else:
+                rim = QColor(255, 255, 255, int(135 * hover_here))
             pen = QPen(rim)
             pen.setWidthF(1.2)
             p.setPen(pen)
@@ -979,6 +1012,7 @@ class TaijiLaunchButton(QWidget):
         big, left, right, eyes, eye_r, _radius, _cx, _cy = self._geometry()
 
         self._paint_shadow(p, big)
+        self._paint_hover_glow(p, big)
         # 把圆内区域先填成控件底色，避免落影从缝隙里透出来
         p.setPen(Qt.NoPen)
         p.setBrush(self.palette().color(self.backgroundRole()))
@@ -998,6 +1032,28 @@ class TaijiLaunchButton(QWidget):
         self._paint_bezel(p, big)
         self._paint_text(p)
         p.end()
+
+    def _paint_hover_glow(self, p, big):
+        """
+        悬停半圆的外发光：三圈递减的弧线叠出"柔光"（Qt 没有模糊画笔，用叠层代替）。
+
+        只描被悬停的那一半，另一半保持安静 —— 这样两只"鱼"各自的边界始终清楚。
+        """
+        side = self._hover
+        if not side or self._hover_t <= 0.01:
+            return
+        color = QColor(self.RUN_COLORS[1] if side == 'run' else self.CLOSE_COLORS[1])
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        for outset, width, alpha in ((3.0, 7.0, 28), (6.0, 4.0, 20), (9.0, 2.4, 13)):
+            pen = QPen(QColor(color.red(), color.green(), color.blue(),
+                              int(alpha * self._hover_t)))
+            pen.setWidthF(width)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            ring = big.adjusted(-outset, -outset, outset, outset)
+            p.drawArc(ring, 90 * 16, (180 if side == 'run' else -180) * 16)
+        p.restore()
 
     def _paint_core_glow(self, p, big, radius, cx, cy):
         """
@@ -1050,15 +1106,11 @@ class TaijiLaunchButton(QWidget):
         side = self._side_at(event.pos())
         if not self._side_enabled(side):
             side = None
-        if side != self._hover:
-            self._hover = side
-            self.update()
+        self._set_hover_side(side)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
-        if self._hover is not None:
-            self._hover = None
-            self.update()
+        self._set_hover_side(None)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1081,24 +1133,130 @@ class TaijiLaunchButton(QWidget):
             else:
                 self.close_requested.emit()
 
-def pill_font(compact=False):
-    """胶囊按钮的字体：雅黑优先；小号用于预设行的小胶囊。"""
-    font = QFont()
-    font.setFamily('Microsoft YaHei UI')
-    font.setPixelSize(12 if compact else 15)
+# ------------------------- 视觉令牌 -------------------------
+#
+# 建立一套可复用的令牌，避免"随手取色、随手改字号"导致风格漂移：
+#   · 字重只用 400 / 600 / 700 三档（中文正文不用细体，小字号会发虚）；
+#   · 动效：悬停 110ms、按下 90ms，统一 ease-out；不用 linear，不做触发布局的动画；
+#   · 颜色：暖灰 + 金 为骨架，绿与朱砂只出现在启停圆盘与状态指示上。
+
+class Theme:
+    INK = '#2B2721'          # 主文字
+    INK_SOFT = '#5C5446'     # 次级文字（标签）
+    MUTED = '#8A8170'        # 辅助说明
+    PANEL = '#EDE7DB'
+    CARD = '#FFFDF8'
+    CARD_EDGE = '#E2DACB'
+    GOLD = '#BEAD86'
+    GOLD_DEEP = '#A8873F'
+    GREEN = '#4CC38A'
+    BLOOD = '#C1121F'
+    HOVER_MS = 110           # 悬停：80–120ms 区间，取偏稳的 110
+    PRESS_MS = 90            # 按下：80–100ms，要比悬停更快才有"手感"
+    ANIMATIONS = True        # 由系统"动画效果"开关决定，见下方 _system_animations_enabled()
+
+    @staticmethod
+    def hover_ms():
+        return Theme.HOVER_MS if Theme.ANIMATIONS else 1
+
+    @staticmethod
+    def press_ms():
+        return Theme.PRESS_MS if Theme.ANIMATIONS else 1
+
+
+def _system_animations_enabled():
+    """
+    读取 Windows「动画效果」开关（SPI_GETCLIENTAREAANIMATION）。
+
+    桌面端没有 CSS 的 `prefers-reduced-motion`，等价物就是这个系统开关：
+    关掉后过渡时长压到 1ms，界面立刻响应，同时保留最终视觉状态。
+    """
+    if sys.platform != 'win32':
+        return True
+    try:
+        value = ctypes.c_int(1)
+        ok = ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(value), 0)
+        return bool(value.value) if ok else True
+    except Exception:
+        return True
+
+
+Theme.ANIMATIONS = _system_animations_enabled()
+
+_FAMILY_CACHE = {}
+
+
+def _resolve_family(kind):
+    """
+    按"首选 → 回退"挑一个本机存在的字体家族，结果缓存。
+
+    为什么要回退链：Noto Sans SC 有多档字重（Light/Medium/Black），做标题层次比
+    雅黑细；但它不随 Windows 预装，缺了就退回雅黑 UI，界面不会崩成宋体。
+    """
+    if kind in _FAMILY_CACHE:
+        return _FAMILY_CACHE[kind]
+    wanted = {
+        'display': ('Noto Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI'),
+        'text': ('Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', 'Arial'),
+        'mono': ('Cascadia Mono', 'Consolas', 'Courier New'),
+    }[kind]
+    installed = set(QFontDatabase().families())
+    chosen = next((f for f in wanted if f in installed), wanted[-1])
+    _FAMILY_CACHE[kind] = chosen
+    return chosen
+
+
+def ui_font(size=13, weight=QFont.Normal, kind='text', spacing=0.0):
+    """统一字体入口：家族按角色解析、字重只用几档、字距只在短标签上加。"""
+    font = QFont(_resolve_family(kind))
+    font.setPixelSize(int(size))
+    font.setWeight(weight)
+    if spacing:
+        font.setLetterSpacing(QFont.AbsoluteSpacing, float(spacing))
     return font
+
+
+def pill_font(compact=False):
+    """胶囊按钮的字体：13px Medium；预设行的小胶囊 12px。"""
+    return ui_font(12 if compact else 13,
+                   QFont.DemiBold if compact else QFont.Medium,
+                   'text', 0.3)
+
+
+def _rounded_path(rect, tl, tr, br, bl):
+    """
+    四角半径各不相同（外小内大）的圆角矩形路径。
+
+    `QPainterPath.addRoundedRect` 只支持统一半径，所以手工按四角拼弧线；
+    顺序是 左上 → 右上 → 右下 → 左下。
+    """
+    path = QPainterPath()
+    path.moveTo(rect.left() + tl, rect.top())
+    path.lineTo(rect.right() - tr, rect.top())
+    if tr > 0:
+        path.arcTo(QRectF(rect.right() - 2 * tr, rect.top(), 2 * tr, 2 * tr), 90, -90)
+    path.lineTo(rect.right(), rect.bottom() - br)
+    if br > 0:
+        path.arcTo(QRectF(rect.right() - 2 * br, rect.bottom() - 2 * br, 2 * br, 2 * br), 0, -90)
+    path.lineTo(rect.left() + bl, rect.bottom())
+    if bl > 0:
+        path.arcTo(QRectF(rect.left(), rect.bottom() - 2 * bl, 2 * bl, 2 * bl), 270, -90)
+    path.lineTo(rect.left(), rect.top() + tl)
+    if tl > 0:
+        path.arcTo(QRectF(rect.left(), rect.top(), 2 * tl, 2 * tl), 180, -90)
+    path.closeSubpath()
+    return path
 
 
 class PillButton(QPushButton):
     """
-    象牙白 + 灰金的胶囊按钮。
+    象牙白 + 灰金胶囊按钮（v1.11.0 起改为自绘，带逐帧过渡）。
 
-    宽度由外部给定（列内同一排左右等宽），高度固定 38。
+    为什么放弃 QSS：QSS 的 `:hover` 是瞬时切换，无法过渡；而靠定时器反复重设
+    `styleSheet` 会触发整棵样式树重算。自绘后悬停 110ms、按下 90ms 都是属性插值，
+    只触发重绘、不触发布局，符合"微交互不动布局"的约束。
 
-    圆角按"内外呼应"区分：贴圆的一侧保持大圆角（= 高度一半），朝边框的一侧收小，
-    左侧列收左边、右侧列收右边，两列合起来正好对着面板的外缘，视觉上像被削平了一样。
-
-    compact=True 用于预设行（新建 / 删除），尺寸更小但外观完全同源。
+    圆角内外呼应：贴圆一侧 19px（高度一半），朝外一侧 8px；左右列各自反向。
     """
 
     HEIGHT = 38
@@ -1111,38 +1269,6 @@ class PillButton(QPushButton):
 
     SMALL_RADIUS = 8        # 朝外一侧的小圆角
 
-    # 四角独立设置；只保留一圈统一描边色，不再给上下沿单独上色
-    # （上沿白色描边曾在浅色面板上显出一条亮线，与其余三边不一致）。
-    _QSS = """
-    QPushButton {{
-        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #FFFFFF, stop:0.5 #FDFAF3, stop:1 #F1E9D9);
-        border: 1px solid #BEAD86;
-        border-top-left-radius: {tl}px;
-        border-top-right-radius: {tr}px;
-        border-bottom-left-radius: {bl}px;
-        border-bottom-right-radius: {br}px;
-        color: #383227;
-        padding: 0 1px;
-    }}
-    QPushButton:hover {{
-        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #FFFFFF, stop:0.5 #FCF8F0, stop:1 #F2EBDC);
-        border-color: #B0955C;
-        color: #1C1810;
-    }}
-    QPushButton:pressed {{
-        background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                          stop:0 #E4D9C1, stop:1 #F3EDE0);
-        border-color: #99813F;
-    }}
-    QPushButton:disabled {{
-        color: #A79E8B;
-        border-color: #DCD3BF;
-        background-color: #F2EDE3;
-    }}
-    """
-
     def __init__(self, text, parent=None, compact=False, small_side=None):
         super().__init__(text, parent)
         self._compact = compact
@@ -1151,29 +1277,160 @@ class PillButton(QPushButton):
         self._min_width = self.MIN_WIDTH_COMPACT if compact else self.MIN_WIDTH
         self._small_side = small_side          # None / 'left' / 'right'
 
+        self._hover_t = 0.0
+        self._press_t = 0.0
+
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(self._height)
         self.setFont(pill_font(compact))
-        self._apply_style()
 
-    def _apply_style(self):
+        self._hover_anim = QPropertyAnimation(self, b'hover_t', self)
+        self._hover_anim.setDuration(Theme.hover_ms())
+        self._hover_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._press_anim = QPropertyAnimation(self, b'press_t', self)
+        self._press_anim.setDuration(Theme.press_ms())
+        self._press_anim.setEasingCurve(QEasingCurve.OutQuad)
+
+    # ---- 动画属性 ----
+    def _get_hover_t(self):
+        return self._hover_t
+
+    def _set_hover_t(self, value):
+        self._hover_t = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    hover_t = pyqtProperty(float, _get_hover_t, _set_hover_t)
+
+    def _get_press_t(self):
+        return self._press_t
+
+    def _set_press_t(self, value):
+        self._press_t = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    press_t = pyqtProperty(float, _get_press_t, _set_press_t)
+
+    def _glide(self, anim, attr, target):
+        anim.stop()
+        anim.setStartValue(getattr(self, attr))
+        anim.setEndValue(target)
+        anim.start()
+
+    # ---- 尺寸与圆角 ----
+    def corner_radii(self):
+        """返回 (左上, 右上, 右下, 左下)，绘制与验收共用同一份定义。"""
         big = self._height // 2
         small = min(self.SMALL_RADIUS, big)
         if self._small_side == 'left':
-            tl = bl = small
-            tr = br = big
-        elif self._small_side == 'right':
-            tl = bl = big
-            tr = br = small
-        else:
-            tl = tr = bl = br = big
-        self.setStyleSheet(self._QSS.format(tl=tl, tr=tr, bl=bl, br=br))
+            return (small, big, big, small)
+        if self._small_side == 'right':
+            return (big, small, small, big)
+        return (big, big, big, big)
 
     def sizeHint(self):
         metrics = self.fontMetrics()
         width = metrics.horizontalAdvance(self.text()) + self._padding * 2
         return QSize(max(self._min_width, width), self._height)
 
+    # ---- 交互 ----
+    def enterEvent(self, event):
+        self._glide(self._hover_anim, '_hover_t', 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._glide(self._hover_anim, '_hover_t', 0.0)
+        self._glide(self._press_anim, '_press_t', 0.0)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self._glide(self._press_anim, '_press_t', 1.0)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._glide(self._press_anim, '_press_t', 0.0)
+        super().mouseReleaseEvent(event)
+
+    # ---- 绘制 ----
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        h, pr = self._hover_t, self._press_t
+        enabled = self.isEnabled()
+        rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        tl, tr, br, bl = self.corner_radii()
+        path = _rounded_path(rect, tl, tr, br, bl)
+
+        if enabled:
+            top = QColor('#FFFFFF')
+            bottom = _mix_color(QColor('#F1E9D9'), QColor('#FFF9EC'), h)
+            if pr > 0:
+                top = _mix_color(top, QColor('#EADFC8'), pr * 0.9)
+                bottom = _mix_color(bottom, QColor('#F8F2E5'), pr * 0.9)
+            # 四边同色（REQ-009 明确要求过，不再给上沿单独提亮），
+            # 悬停时整体转为更深的金，明度差靠内侧高光与衬底渐变承担
+            edge = _mix_color(QColor('#C3B18A'), QColor('#9C7C33'), h)
+            text_color = _mix_color(QColor('#3A3429'), QColor('#0F0D09'), h)
+        else:
+            top, bottom = QColor('#F6F2E9'), QColor('#EFEADE')
+            edge = QColor('#DCD3BF')
+            text_color = QColor('#A79E8B')
+
+        # 1) 主体：竖向渐变，上半接近纯白，下半是米金
+        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(0.45, _mix_color(top, bottom, 0.30))
+        grad.setColorAt(1.0, bottom)
+        p.fillPath(path, QBrush(grad))
+
+        # 2) 底部内阴影：常态=压铸厚度，悬停减弱（抬起），按下增强（压入）
+        depth = 0.52 - 0.34 * h + 0.50 * pr
+        depth = max(0.0, min(1.0, depth))
+        if depth > 0.02:
+            shade = QLinearGradient(QPointF(0, rect.center().y() - 2), QPointF(0, rect.bottom()))
+            shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+            shade.setColorAt(1.0, QColor(0, 0, 0, int(52 * depth)))
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(rect, QBrush(shade))
+            p.restore()
+
+        # 3) 顶部 1px 镜面高光：悬停更亮，按下时几乎消失
+        hi = int((72 + 128 * h) * (1.0 - 0.85 * pr))
+        if hi > 4:
+            p.setPen(QPen(QColor(255, 255, 255, hi), 1.0))
+            p.drawLine(QPointF(rect.left() + max(tl * 0.85, 2), rect.top() + 1.2),
+                       QPointF(rect.right() - max(tr * 0.85, 2), rect.top() + 1.2))
+
+        # 3b) 底缘反光：悬停时才出现，配合减弱的内阴影形成"抬起"错觉
+        if h > 0.05:
+            p.setPen(QPen(QColor(255, 255, 255, int(70 * h)), 1.0))
+            p.drawLine(QPointF(rect.left() + max(bl * 0.9, 2), rect.bottom() - 1.2),
+                       QPointF(rect.right() - max(br * 0.9, 2), rect.bottom() - 1.2))
+
+        # 4) 描边：四边同色；悬停时加深，避免出现"上沿白线"那种不一致
+        pen = QPen(edge, 1.0)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+
+        # 5) 文字：按下时整体下沉 0.9px，模拟实体键程
+        p.setFont(self.font())
+        p.setPen(text_color)
+        p.drawText(rect.translated(0, 0.9 * pr), Qt.AlignCenter, self.text())
+
+        # 6) 键盘焦点环：只在 Tab 聚焦时出现
+        if enabled and self.hasFocus():
+            pen = QPen(QColor(168, 135, 63, 165))
+            pen.setWidthF(1.0)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            inner = rect.adjusted(2.0, 2.0, -2.0, -2.0)
+            p.drawPath(_rounded_path(inner, max(tl - 2, 1), max(tr - 2, 1),
+                                     max(br - 2, 1), max(bl - 2, 1)))
+        p.end()
 
 class PillColumn(QWidget):
     """
@@ -1423,21 +1680,12 @@ class SettingRow(QWidget):
         self.setFocusPolicy(Qt.StrongFocus if with_switch else Qt.NoFocus)
         self.setCursor(Qt.PointingHandCursor if with_switch else Qt.ArrowCursor)
 
-        title_font = QFont()
-        title_font.setFamily('Microsoft YaHei UI')
-        title_font.setPixelSize(14)
-        title_font.setBold(True)
-
         self.title_label = QLabel(title, self)
-        self.title_label.setFont(title_font)
+        self.title_label.setFont(ui_font(14, QFont.DemiBold, 'text', 0.3))
         self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        desc_font = QFont()
-        desc_font.setFamily('Microsoft YaHei UI')
-        desc_font.setPixelSize(11)
-
         self.desc_label = QLabel(description, self)
-        self.desc_label.setFont(desc_font)
+        self.desc_label.setFont(ui_font(11, QFont.Normal, 'text'))
         self.desc_label.setWordWrap(True)
         self.desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
@@ -1640,11 +1888,7 @@ class SettingsDialog(QDialog):
 
         title = QLabel('设置', self)
         title.setObjectName('settingsTitle')
-        title_font = QFont()
-        title_font.setFamily('Microsoft YaHei UI')
-        title_font.setPixelSize(17)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        title.setFont(ui_font(17, QFont.Bold, 'display', 0.3))
 
         enabled_now = autostart_state(key_path, value_name)[0]
         self.row_autostart = SettingRow(
@@ -1657,10 +1901,7 @@ class SettingsDialog(QDialog):
 
         self.hint = QLabel('', self)
         self.hint.setObjectName('settingsHint')
-        hint_font = QFont()
-        hint_font.setFamily('Microsoft YaHei UI')
-        hint_font.setPixelSize(11)
-        self.hint.setFont(hint_font)
+        self.hint.setFont(ui_font(11, QFont.Normal, 'text'))
         self.hint.setWordWrap(False)
 
         self.btn_close = PillButton('关闭', compact=True)
@@ -1714,6 +1955,235 @@ class SettingsDialog(QDialog):
         self.refresh()
 
 
+def _kind_of(path):
+    """列表行要画的类型：dir / exe / file / missing。"""
+    kind = entry_kind(path)
+    if kind != 'file':
+        return kind
+    ext = os.path.splitext(str(path))[1].lower()
+    return 'exe' if ext in ('.exe', '.lnk', '.bat', '.cmd', '.com', '.msi') else 'file'
+
+
+def _strip_kind_prefix(text):
+    """列表文字里原有的 📁 / ⚠ 前缀去掉——类型改由矢量图形表达，不再用 emoji。"""
+    for prefix in ('📁 ', '⚠ ', '📁', '⚠'):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+class ListRowDelegate(QStyledItemDelegate):
+    """
+    列表行绘制：左侧画类型图形、右侧画名称，底色由父视图的补间值驱动。
+
+    为什么自绘：QSS 的 `::item:hover` 是瞬时切换，且无法做圆角行块 + 左侧强调条；
+    用 delegate 后悬停与选中都能按帧淡入淡出，行高也由这里统一控制。
+    """
+
+    ROW_HEIGHT = 34
+    GLYPH = 18
+
+    def __init__(self, view):
+        super().__init__(view)
+        self._view = view
+        self._font = ui_font(13, QFont.Normal, 'text', 0.2)
+
+    def sizeHint(self, option, index):
+        return QSize(0, self.ROW_HEIGHT)
+
+    def paint(self, painter, option, index):
+        row = index.row()
+        hover = self._view.hover_value(row)
+        select = self._view.select_value(row)
+        path = index.data(Qt.UserRole) or ''
+        kind = index.data(Qt.UserRole + 1) or _kind_of(path)
+        text = _strip_kind_prefix(index.data(Qt.DisplayRole) or '')
+
+        rect = QRectF(option.rect).adjusted(2.0, 1.0, -2.0, -1.0)
+        radius = 8.0
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # 底色：悬停=暖白、选中=暖金；取较大值，避免两种状态叠成两层色块
+        strength = max(hover * 0.85, select * 0.95)
+        if strength > 0.01:
+            tint = _mix_color(QColor('#FBF6EC'), QColor('#EFE2C4'), select)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(tint.red(), tint.green(), tint.blue(), int(255 * strength)))
+            painter.drawPath(_rounded_path(rect, radius, radius, radius, radius))
+
+        # 选中时左侧强调条：只在选中态出现，悬停不出现，避免噪音
+        if select > 0.02:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(176, 142, 79, int(235 * select)))
+            painter.drawRoundedRect(
+                QRectF(rect.left() + 6.0, rect.top() + 8.0, 3.0, rect.height() - 16.0), 1.5, 1.5)
+
+        glyph_box = QRectF(rect.left() + 12.0,
+                           rect.center().y() - self.GLYPH / 2.0,
+                           self.GLYPH, self.GLYPH)
+        self._paint_glyph(painter, glyph_box, kind)
+
+        text_left = glyph_box.right() + 9.0
+        text_rect = QRectF(text_left, rect.top(),
+                           max(10.0, rect.right() - text_left - 10.0), rect.height())
+        if kind == 'missing':
+            color = QColor('#A8543C')
+        else:
+            color = _mix_color(QColor('#33302A'), QColor('#14120E'), max(hover, select))
+        painter.setFont(self._font)
+        painter.setPen(color)
+        elided = painter.fontMetrics().elidedText(text, Qt.ElideMiddle, int(text_rect.width()))
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+        painter.restore()
+
+    def _paint_glyph(self, p, box, kind):
+        """用 18×18 的矢量图形表达类型：文件夹 / 可执行 / 普通文件 / 失效。"""
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        if kind == 'dir':
+            tab = QRectF(box.left() + 1.5, box.top() + 2.5, box.width() * 0.46, 4.2)
+            body = QRectF(box.left() + 1.5, box.top() + 5.0,
+                          box.width() - 3.0, box.height() - 7.5)
+            pen = QPen(QColor('#B08E4F'), 1.2)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(QColor(200, 169, 106, 40))
+            p.drawRoundedRect(tab, 1.2, 1.2)
+            p.setBrush(QColor(200, 169, 106, 26))
+            p.drawRoundedRect(body, 2.2, 2.2)
+
+        elif kind == 'exe':
+            outer = QRectF(box.left() + 2.0, box.top() + 2.0,
+                           box.width() - 4.0, box.height() - 4.0)
+            p.setPen(QPen(QColor('#8A8170'), 1.2))
+            p.setBrush(QColor(138, 129, 112, 22))
+            p.drawRoundedRect(outer, 3.2, 3.2)
+            cx, cy = outer.center().x(), outer.center().y()
+            tri = QPainterPath()
+            tri.moveTo(cx - 2.2, cy - 3.4)
+            tri.lineTo(cx + 3.6, cy)
+            tri.lineTo(cx - 2.2, cy + 3.4)
+            tri.closeSubpath()
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor('#6E6759'))
+            p.drawPath(tri)
+
+        elif kind == 'missing':
+            tri = QPainterPath()
+            tri.moveTo(box.center().x(), box.top() + 2.4)
+            tri.lineTo(box.right() - 2.0, box.bottom() - 3.0)
+            tri.lineTo(box.left() + 2.0, box.bottom() - 3.0)
+            tri.closeSubpath()
+            pen = QPen(QColor('#C0503C'), 1.2)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(QColor(192, 80, 60, 28))
+            p.drawPath(tri)
+            p.setPen(QColor('#C0503C'))
+            p.setFont(ui_font(9, QFont.Bold, 'text'))
+            p.drawText(QRectF(box.left(), box.bottom() - 8.5, box.width(), 8.5),
+                       Qt.AlignCenter, '!')
+
+        else:      # file
+            page = QRectF(box.left() + 3.5, box.top() + 2.0,
+                          box.width() - 7.0, box.height() - 4.0)
+            p.setPen(QPen(QColor('#8A8170'), 1.2))
+            p.setBrush(QColor(138, 129, 112, 16))
+            p.drawRoundedRect(page, 2.0, 2.0)
+            p.drawLine(QPointF(page.left() + 3.0, page.center().y() + 1.5),
+                       QPointF(page.right() - 3.0, page.center().y() + 1.5))
+        p.restore()
+
+
+class AnimatedList(QListWidget):
+    """
+    带逐行悬停 / 选中过渡的列表。
+
+    一个 16ms 的补间器统一推进所有行的动画值，而不是给每行建 QPropertyAnimation：
+    行数变化时不必维护动画对象生命周期，且只重绘 viewport、不触发布局。
+    缓动指数 0.30 相当于 ~110ms 收敛，与按钮的悬停时长一致。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_row = -1
+        self._hover_val = {}
+        self._select_val = {}
+
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(16)
+        self._ticker.timeout.connect(self._step)
+
+        self.setMouseTracking(True)
+        self.setUniformItemSizes(True)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setItemDelegate(ListRowDelegate(self))
+        self.itemEntered.connect(self._on_item_entered)
+        self.itemSelectionChanged.connect(self._wake)
+
+    # ---- 供 delegate 读取 ----
+    def hover_value(self, row):
+        return self._hover_val.get(row, 0.0)
+
+    def select_value(self, row):
+        return self._select_val.get(row, 0.0)
+
+    # ---- 补间 ----
+    def _on_item_entered(self, item):
+        row = self.row(item)
+        if row != self._hover_row:
+            self._hover_row = row
+            self._wake()
+
+    def leaveEvent(self, event):
+        self._hover_row = -1
+        self._wake()
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        self._hover_row = -1      # 滚动后行号已不可信，先清空再由 itemEntered 重新点亮
+
+    def _wake(self):
+        count = self.count()
+        for row in range(count):
+            self._hover_val.setdefault(row, 0.0)
+            self._select_val.setdefault(row, 0.0)
+        # 行数变少时清掉越界键，避免字典无限增长
+        for store in (self._hover_val, self._select_val):
+            for row in [k for k in store if k >= count]:
+                del store[row]
+        if not self._ticker.isActive():
+            self._ticker.start()
+
+    def _step(self):
+        changed = False
+        moving = False
+        count = self.count()
+        for row in range(count):
+            item = self.item(row)
+            targets = (
+                (self._hover_val, 1.0 if row == self._hover_row else 0.0, 0.30),
+                (self._select_val, 1.0 if item is not None and item.isSelected() else 0.0, 0.35),
+            )
+            for store, target, rate in targets:
+                cur = store.get(row, 0.0)
+                if abs(cur - target) < 0.008:
+                    new = target
+                else:
+                    new = cur + (target - cur) * rate
+                    moving = True
+                if new != cur:
+                    store[row] = new
+                    changed = True
+        if changed:
+            self.viewport().update()
+        if not moving:
+            self._ticker.stop()
+
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1756,8 +2226,11 @@ class LauncherWindow(QMainWindow):
 
         # 预设行
         self.preset_label = QLabel('预设方案')
+        self.preset_label.setFont(ui_font(12, QFont.DemiBold, 'text', 0.4))
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
+        self.preset_combo.setFont(ui_font(13, QFont.Normal, 'text', 0.2))
+        self.preset_combo.setMinimumHeight(30)
         self.btn_new_preset = PillButton('新建', compact=True)
         self.btn_del_preset = PillButton('删除', compact=True)
 
@@ -1768,21 +2241,35 @@ class LauncherWindow(QMainWindow):
         preset_layout.addWidget(self.btn_del_preset)
 
         # 程序列表
-        self.list_widget = QListWidget()
+        self.list_widget = AnimatedList()
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.setDragDropMode(QAbstractItemView.DropOnly)
         self.list_widget.setDefaultDropAction(Qt.CopyAction)
+        # 行内底色与文字由 delegate 画，这里的 QSS 只负责容器与滚动条，
+        # 并且必须把 ::item 的背景清空——否则 Qt 会在自绘行上再叠一层默认选中块。
         self.list_widget.setStyleSheet("""
             QListWidget {
                 background: #FFFFFF;
-                border: 1px solid #E2DACB;
+                border: 1px solid #E7DECD;
                 border-radius: 12px;
-                padding: 6px;
-                color: #2E2A24;
+                padding: 4px;
+                outline: none;
             }
-            QListWidget::item { padding: 6px 8px; border-radius: 8px; }
-            QListWidget::item:hover { background: #F7F2E7; }
-            QListWidget::item:selected { background: #EFE5CF; color: #221E17; }
+            QListWidget::item { background: transparent; border: none; }
+            QListWidget::item:selected { background: transparent; }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 4px 2px 4px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #E2D9C6;
+                border-radius: 4px;
+                min-height: 28px;
+            }
+            QScrollBar::handle:vertical:hover { background: #CBB996; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """)
 
         # 六项操作做成胶囊条，挂在圆的左右两侧——中间只留一颗圆，不与按钮堆在一起。
@@ -1828,25 +2315,29 @@ class LauncherWindow(QMainWindow):
         # 三层明度拉出层次：暖白面板（最深）→ 象牙白胶囊（中间调）→ 纯白列表（最亮）
         self.preset_label.setObjectName('presetLabel')
         self.setStyleSheet("""
-            #panel { background-color: #EDE7DB; }
-            QLabel#presetLabel { color: #4C463A; }
-            QComboBox {
-                background: #FFFDF8;
-                border: 1px solid #D6CBB2;
-                border-radius: 6px;
-                padding: 4px 8px;
-                color: #35302A;
-            }
-            QComboBox:hover { border-color: #B0955C; }
-            QComboBox::drop-down { border: none; width: 20px; }
-            QComboBox QAbstractItemView {
-                background: #FFFDF8;
-                border: 1px solid #D6CBB2;
+            #panel {{ background-color: {panel}; }}
+            QLabel#presetLabel {{ color: {ink_soft}; }}
+            QComboBox {{
+                background: {card};
+                border: 1px solid #E1D6BF;
+                border-radius: 8px;
+                padding: 5px 10px;
+                color: {ink};
                 selection-background-color: #EFE6D2;
-                selection-color: #221E17;
+            }}
+            QComboBox:hover {{ border-color: #C0A76F; }}
+            QComboBox:focus {{ border-color: {gold_deep}; }}
+            QComboBox::drop-down {{ border: none; width: 24px; }}
+            QComboBox QAbstractItemView {{
+                background: {card};
+                border: 1px solid #E1D6BF;
+                padding: 4px;
+                selection-background-color: #EFE6D2;
+                selection-color: {ink};
                 outline: none;
-            }
-        """)
+            }}
+        """.format(panel=Theme.PANEL, card=Theme.CARD, ink=Theme.INK,
+                   ink_soft=Theme.INK_SOFT, gold_deep=Theme.GOLD_DEEP))
 
         layout = QVBoxLayout(central)
         layout.setContentsMargins(12, 10, 12, 12)
@@ -2009,6 +2500,8 @@ class LauncherWindow(QMainWindow):
 
         item = QListWidgetItem(entry_label(path))
         item.setData(Qt.UserRole, path)
+        # 类型在入列时算一次，delegate 每帧只读缓存 —— 否则重绘会反复做磁盘探测
+        item.setData(Qt.UserRole + 1, _kind_of(path))
         item.setToolTip(entry_tooltip(path))
         self.list_widget.addItem(item)
 

@@ -111,21 +111,22 @@ assert left_edge < win.taiji.geometry().left(), "左列不应压到圆"
 assert right_edge > win.taiji.geometry().right(), "右列不应压到圆"
 
 # ---------- 6. 圆角与边框 ----------
+# v1.11.0 起胶囊改为自绘（QSS 只剩空串），圆角改由 corner_radii() 对外暴露，
+# 断言因此从"查样式表字符串"改为"查几何定义"——语义相同，且不再依赖实现细节。
 for label, column, small_side in (('左列', win.left_pills, 'left'),
                                   ('右列', win.right_pills, 'right')):
     for b in column._buttons:
-        qss = b.styleSheet()
+        assert b.styleSheet() == '', "胶囊应完全自绘，不应再挂 QSS（否则会出现瞬时 hover）"
         big = b.height() // 2
         small = launchforge.PillButton.SMALL_RADIUS
+        tl, tr, br, bl = b.corner_radii()
         if small_side == 'left':
-            assert 'border-top-left-radius: %dpx' % small in qss, "左列左侧应为小圆角"
-            assert 'border-top-right-radius: %dpx' % big in qss, "左列右侧应保持大圆角"
+            assert (tl, bl) == (small, small), "左列左侧应为小圆角：%s" % ((tl, bl),)
+            assert (tr, br) == (big, big), "左列右侧应保持大圆角"
         else:
-            assert 'border-top-left-radius: %dpx' % big in qss, "右列左侧应保持大圆角"
-            assert 'border-top-right-radius: %dpx' % small in qss, "右列右侧应为小圆角"
-        assert 'border-top-color' not in qss, "不应再给上沿单独上色（会出现白色描边）"
-        assert 'border-bottom-color' not in qss, "四周边框颜色应统一"
-print("[6] 圆角：左列 左小(r=%d)/右大(r=%d)，右列反之；边框无单独上色 ✅"
+            assert (tl, bl) == (big, big), "右列左侧应保持大圆角"
+            assert (tr, br) == (small, small), "右列右侧应为小圆角：%s" % ((tr, br),)
+print("[6] 圆角：左列 左小(r=%d)/右大(r=%d)，右列反之；无 QSS 覆写 ✅"
       % (launchforge.PillButton.SMALL_RADIUS, launchforge.PillButton.HEIGHT // 2))
 
 # ---------- 7. 设置入口打开面板（v1.10.0 起不再是"尚未实现"） ----------
