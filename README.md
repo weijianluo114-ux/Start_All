@@ -98,7 +98,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.11.0 ^
+    --name LaunchForge_v1.12.0 ^
     src\launchforge.py
 ```
 
@@ -118,6 +118,7 @@ python test_step9_pill_layout.py
 python test_step10_document_entries.py
 python test_step11_settings_autostart.py
 python test_step12_typography_motion.py
+python test_step13_font_settings.py
 pythonw test_step6_no_console_flash.py
 ```
 

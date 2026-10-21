@@ -69,7 +69,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.11.0'
+APP_VERSION = '1.12.0'
 
 log = logging.getLogger('launchforge')
 
@@ -972,7 +972,10 @@ class TaijiLaunchButton(QWidget):
         _big, _l, _r, _eyes, _er, radius, cx, cy = self._geometry()
         font = QFont(self.font())
         font.setWeight(QFont.DemiBold)
-        font.setPixelSize(max(13, int(radius * 0.36)))
+        # 字号默认由盘面直径决定；跟随全局字号时只允许 ±16% 的浮动，
+        # 再多就会把字压到 S 形缝隙或盘沿上（圆盘是插画，不是排版容器）。
+        follow = max(0.94, min(1.16, FontPrefs.scale()))
+        font.setPixelSize(max(13, int(radius * 0.36 * follow)))
         p.save()
         p.setFont(font)
         fm = p.fontMetrics()
@@ -1183,37 +1186,201 @@ def _system_animations_enabled():
 
 Theme.ANIMATIONS = _system_animations_enabled()
 
+# ------------------------- 全局字体设置（v1.12.0） -------------------------
+#
+# 界面里能调的只有两件事：**用哪套字体搭配**、**正文基准字号**。
+# 字号取 11–17px 整数档（基准 13px），其余角色按同一比例缩放：
+#   标题 17 → 正文 13 → 说明 11，级差是固定的，调大调小都不会把层级压平。
+#
+# 每套搭配给的是"标题家族 + 正文字族"两列，而不是单一字体名：
+# 中英混排时西文与数字用更精神的 Segoe UI，中文回落雅黑，才叫"搭配"。
+
+FONT_SIZE_BASE = 13
+FONT_SIZE_MIN = 11
+FONT_SIZE_MAX = 17
+
+FONT_PRESETS = (
+    {
+        'key': 'classic',
+        'name': '雅黑 × 思源',
+        'note': '标题思源、正文雅黑 · 当前默认观感',
+        'display': ('Noto Sans SC', 'Microsoft YaHei UI', '微软雅黑', 'Microsoft YaHei'),
+        'text': ('Microsoft YaHei UI', '微软雅黑', 'Microsoft YaHei'),
+    },
+    {
+        'key': 'yahei',
+        'name': '雅黑经典',
+        'note': '只用系统自带雅黑 · 最稳妥，不依赖额外安装',
+        'display': ('Microsoft YaHei UI', '微软雅黑', 'Microsoft YaHei'),
+        'text': ('Microsoft YaHei UI', '微软雅黑', 'Microsoft YaHei'),
+    },
+    {
+        'key': 'dengxian',
+        'name': '等线清朗',
+        'note': '字形偏瘦、字面更高 · 同字号下更透气',
+        'display': ('等线', 'DengXian', 'Microsoft YaHei UI'),
+        'text': ('等线', 'DengXian', 'Microsoft YaHei UI'),
+    },
+    {
+        'key': 'split',
+        'name': '中英分排',
+        'note': '西文数字用 Segoe UI，中文回落雅黑 · 数字更精神',
+        'display': ('Segoe UI', 'Microsoft YaHei UI', '微软雅黑'),
+        'text': ('Segoe UI', 'Microsoft YaHei UI', '微软雅黑'),
+    },
+    {
+        'key': 'serif',
+        'name': '书卷衬线',
+        'note': '标题衬线、正文雅黑 · 气质更文气',
+        'display': ('Noto Serif SC', '宋体', 'SimSun', 'Microsoft YaHei UI'),
+        'text': ('Microsoft YaHei UI', '微软雅黑', 'Microsoft YaHei'),
+    },
+)
+
+
+class FontPrefs:
+    """
+    全局字体偏好的唯一状态源。
+
+    放在模块级而不是 QSettings：配置已经在 `launcher_presets.json` 里，
+    两套持久化只会让"改了没生效"更难排查。
+    """
+
+    KEY = FONT_PRESETS[0]['key']
+    SIZE = FONT_SIZE_BASE
+
+    @staticmethod
+    def scale():
+        """正文基准字号相对 13px 的倍率，所有角色共用。"""
+        return FontPrefs.SIZE / float(FONT_SIZE_BASE)
+
+    @staticmethod
+    def preset(key=None):
+        key = FontPrefs.KEY if key is None else key
+        for item in FONT_PRESETS:
+            if item['key'] == key:
+                return item
+        return FONT_PRESETS[0]
+
+    @staticmethod
+    def set(key=None, size=None):
+        """写入偏好：非法值一律收敛到合法档位，绝不抛错（配置可能被手改坏）。"""
+        if key is not None:
+            valid = {p['key'] for p in FONT_PRESETS}
+            FontPrefs.KEY = key if key in valid else FONT_PRESETS[0]['key']
+        if size is not None:
+            try:
+                size = int(size)
+            except (TypeError, ValueError):
+                size = FONT_SIZE_BASE
+            FontPrefs.SIZE = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, size))
+        _FAMILY_CACHE.clear()      # 家族解析结果依赖当前搭配，必须失效
+        return FontPrefs.KEY, FontPrefs.SIZE
+
+    @staticmethod
+    def installed_families(preset=None):
+        """该搭配里本机真实存在的家族（保持声明顺序）。"""
+        p = preset or FontPrefs.preset()
+        have = set(QFontDatabase().families())
+        return [f for f in p['display'] if f in have]
+
+    @staticmethod
+    def available(preset=None):
+        return bool(FontPrefs.installed_families(preset))
+
+    @staticmethod
+    def fallback_name(preset=None):
+        p = preset or FontPrefs.preset()
+        return p['display'][-1]
+
+
 _FAMILY_CACHE = {}
 
 
-def _resolve_family(kind):
+def _resolve_families(kind):
     """
-    按"首选 → 回退"挑一个本机存在的字体家族，结果缓存。
+    按"当前搭配的首选 → 回退链"挑出本机存在的家族列表，结果按 (角色, 搭配) 缓存。
 
-    为什么要回退链：Noto Sans SC 有多档字重（Light/Medium/Black），做标题层次比
-    雅黑细；但它不随 Windows 预装，缺了就退回雅黑 UI，界面不会崩成宋体。
+    返回**列表**而不是单值：Qt 5.13+ 的 `QFont.setFamilies()` 支持逐字回退，
+    「Segoe UI → 雅黑」这种搭配才能让西文走 Segoe、汉字走雅黑，
+    比把整个界面统一成一个家族更接近专业排版。
     """
-    if kind in _FAMILY_CACHE:
-        return _FAMILY_CACHE[kind]
-    wanted = {
-        'display': ('Noto Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI'),
-        'text': ('Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', 'Arial'),
-        'mono': ('Cascadia Mono', 'Consolas', 'Courier New'),
-    }[kind]
+    cache_key = (kind, FontPrefs.KEY)
+    if cache_key in _FAMILY_CACHE:
+        return _FAMILY_CACHE[cache_key]
+
+    if kind == 'mono':
+        wanted = ('Cascadia Mono', 'Consolas', 'Courier New')
+    else:
+        preset = FontPrefs.preset()
+        wanted = tuple(preset.get(kind) or preset['text'])
+        # 末尾补系统兜底，保证任何机器都能解析出一个家族
+        wanted = wanted + ('Microsoft YaHei UI', '微软雅黑', 'Segoe UI', 'Arial')
+
     installed = set(QFontDatabase().families())
-    chosen = next((f for f in wanted if f in installed), wanted[-1])
-    _FAMILY_CACHE[kind] = chosen
+    chosen = []
+    for family in wanted:
+        if family in installed and family not in chosen:
+            chosen.append(family)
+    if not chosen:
+        chosen = ['Microsoft YaHei UI']
+    _FAMILY_CACHE[cache_key] = chosen
     return chosen
 
 
+def _resolve_family(kind):
+    """单值形态（旧调用点 / 文档约定）：返回首选家族。"""
+    return _resolve_families(kind)[0]
+
+
 def ui_font(size=13, weight=QFont.Normal, kind='text', spacing=0.0):
-    """统一字体入口：家族按角色解析、字重只用几档、字距只在短标签上加。"""
-    font = QFont(_resolve_family(kind))
-    font.setPixelSize(int(size))
+    """
+    统一字体入口：家族按角色+搭配解析、字号按全局基准缩放、字重只用几档。
+
+    `size` 传的是**基准字号**（13 = 正文），不是最终像素值；实际像素由
+    `FontPrefs.SIZE` 统一缩放，下限 10px——再小中文就糊成一团了。
+    """
+    families = _resolve_families(kind)
+    font = QFont(families[0])
+    if len(families) > 1:
+        try:
+            font.setFamilies(families)          # Qt 5.13+，逐字回退
+        except (AttributeError, TypeError):
+            pass                                 # 老版本退化为单家族，不影响布局
+    font.setPixelSize(max(10, int(round(size * FontPrefs.scale()))))
     font.setWeight(weight)
     if spacing:
         font.setLetterSpacing(QFont.AbsoluteSpacing, float(spacing))
     return font
+
+
+def set_ui_font(widget, size=13, weight=QFont.Normal, kind='text', spacing=0.0):
+    """
+    给控件设字体，同时把"基准字号"记在控件上。
+
+    记录 spec 是全局字号能**即时生效**的前提：改字号时遍历控件树按 spec 重建，
+    不必重启程序、也不必给每个控件写一遍刷新逻辑。
+    """
+    widget._lf_font_spec = (size, weight, kind, spacing)
+    widget.setFont(ui_font(size, weight, kind, spacing))
+    return widget
+
+
+def restyle_widgets(root):
+    """按记录的 spec 重建整棵子树的字体，返回处理过的控件数（供测试断言）。"""
+    widgets = [root]
+    try:
+        widgets.extend(root.findChildren(QWidget))
+    except (AttributeError, TypeError):
+        pass
+    count = 0
+    for widget in widgets:
+        spec = getattr(widget, '_lf_font_spec', None)
+        if not spec:
+            continue
+        widget.setFont(ui_font(*spec))
+        count += 1
+    return count
 
 
 def pill_font(compact=False):
@@ -1282,7 +1449,11 @@ class PillButton(QPushButton):
 
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(self._height)
-        self.setFont(pill_font(compact))
+        # 字距 0.3 与 v1.11.0 一致；spec 交给 set_ui_font 记录，全局改字号时统一重建
+        set_ui_font(self,
+                    12 if compact else 13,
+                    QFont.DemiBold if compact else QFont.Medium,
+                    'text', 0.3)
 
         self._hover_anim = QPropertyAnimation(self, b'hover_t', self)
         self._hover_anim.setDuration(Theme.hover_ms())
@@ -1455,6 +1626,15 @@ class PillColumn(QWidget):
         for btn in self._buttons:
             btn.setParent(self)
         self.setFixedSize(max(self._widths), height)
+        self._relayout()
+
+    def set_widths(self, widths):
+        """全局字号变化后重算宽度：列宽取最长一条，逐条按钮重新定位。"""
+        widths = list(widths)
+        if len(widths) != len(self._buttons) or widths == self._widths:
+            return
+        self._widths = widths
+        self.setFixedSize(max(self._widths), self.height())
         self._relayout()
 
     def _relayout(self):
@@ -1668,26 +1848,29 @@ class SettingRow(QWidget):
 
     toggled = pyqtSignal(bool)
 
-    HEIGHT = 90
+    HEIGHT = 90          # 13px 基准下的高度；字号变大时由 sync_height() 撑高
+    PAD_V = 14
 
     def __init__(self, title, description='', checked=False, with_switch=True, parent=None):
         super().__init__(parent)
         self._checked = bool(checked)
         self._hover = False
         self._enabled = True
-
-        self.setFixedHeight(self.HEIGHT)
-        self.setFocusPolicy(Qt.StrongFocus if with_switch else Qt.NoFocus)
-        self.setCursor(Qt.PointingHandCursor if with_switch else Qt.ArrowCursor)
+        self._lines = description.count('\n') + 1
 
         self.title_label = QLabel(title, self)
-        self.title_label.setFont(ui_font(14, QFont.DemiBold, 'text', 0.3))
+        set_ui_font(self.title_label, 14, QFont.DemiBold, 'text', 0.3)
         self.title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self.desc_label = QLabel(description, self)
-        self.desc_label.setFont(ui_font(11, QFont.Normal, 'text'))
+        set_ui_font(self.desc_label, 11, QFont.Normal, 'text')
         self.desc_label.setWordWrap(True)
         self.desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.sync_height()
+
+        self.setFocusPolicy(Qt.StrongFocus if with_switch else Qt.NoFocus)
+        self.setCursor(Qt.PointingHandCursor if with_switch else Qt.ArrowCursor)
 
         self.switch = ToggleSwitch(self._checked, self) if with_switch else None
         if self.switch is not None:
@@ -1710,6 +1893,18 @@ class SettingRow(QWidget):
             row.addWidget(self.switch, 0, Qt.AlignVCenter)
 
         self._apply_text_colors()
+
+    def sync_height(self):
+        """
+        行高按文字实际行数计算。
+
+        固定 90px 在 13px 基准下刚好，但全局字号调到 17px 时说明会折成三行，
+        卡片会裁掉最后一行——这正是"越界"最典型的来源，所以高度随字号长。
+        """
+        title_h = self.title_label.fontMetrics().height()
+        line_h = self.desc_label.fontMetrics().lineSpacing()
+        needed = self.PAD_V * 2 + title_h + 5 + line_h * max(1, self._lines)
+        self.setFixedHeight(max(self.HEIGHT, int(round(needed))))
 
     # ---- 状态 ----
     def is_checked(self):
@@ -1857,38 +2052,295 @@ class SettingRow(QWidget):
         return super().eventFilter(obj, event)
 
 
+class CardFrame(QWidget):
+    """
+    非交互卡片容器：只提供与 `SettingRow` 同族的底色、圆角与描边。
+
+    设置面板里要放"字体内的一组控件"，用 `SettingRow` 会把右侧开关位置占掉；
+    拆出这层之后，卡片里的内容想怎么排就怎么排，观感仍与自启动那一行同族。
+    """
+
+    RADIUS = 10.0
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        bg = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        bg.setColorAt(0.0, QColor('#FFFDF8'))
+        bg.setColorAt(1.0, QColor('#F8F2E6'))
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.RADIUS, self.RADIUS)
+        p.fillPath(path, QBrush(bg))
+        p.setPen(QPen(QColor('#E2DACB'), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.end()
+
+
+class SizeSlider(QWidget):
+    """
+    字号滑块（自绘）。
+
+    不用 `QSlider` + QSS：QSS 画不出"刻度点 + 金色进度 + 悬浮光晕"这套语言，
+    而设置面板是全界面唯一需要滑块的场景，手绘一次比调十行样式更可控。
+    刻度等分到每一个整数档，拖到哪儿一眼能看出是第几档。
+    """
+
+    valueChanged = pyqtSignal(int)     # 拖动过程中持续发，用于实时预览
+    released = pyqtSignal(int)         # 松手/键盘调整后发一次，用于落盘
+
+    HEIGHT = 28
+    SIDE = 9.0
+    HANDLE_R = 6.6
+    TRACK_H = 3.0
+
+    def __init__(self, minimum=FONT_SIZE_MIN, maximum=FONT_SIZE_MAX,
+                 value=FONT_SIZE_BASE, parent=None):
+        super().__init__(parent)
+        if maximum <= minimum:
+            maximum = minimum + 1
+        self._min, self._max = int(minimum), int(maximum)
+        self._value = max(self._min, min(self._max, int(value)))
+        self._dragging = False
+        self._hover = False
+        self._hover_t = 0.0
+
+        self.setFixedHeight(self.HEIGHT)
+        self.setMinimumWidth(120)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setToolTip('界面字号 %d–%d px' % (self._min, self._max))
+
+        self._anim = QPropertyAnimation(self, b'hover_t', self)
+        self._anim.setDuration(Theme.hover_ms())
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # ---- 数值 ----
+    def minimum(self):
+        return self._min
+
+    def maximum(self):
+        return self._max
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value, emit=True):
+        value = max(self._min, min(self._max, int(round(value))))
+        if value == self._value:
+            return
+        self._value = value
+        self.update()
+        if emit:
+            self.valueChanged.emit(value)
+
+    def _x_for(self, value):
+        span = self._max - self._min
+        ratio = 0.0 if span == 0 else (value - self._min) / float(span)
+        return self.SIDE + ratio * (self.width() - 2 * self.SIDE)
+
+    def _value_at(self, x):
+        span = self.width() - 2 * self.SIDE
+        if span <= 0:
+            return self._min
+        ratio = (x - self.SIDE) / float(span)
+        ratio = max(0.0, min(1.0, ratio))
+        return self._min + int(round(ratio * (self._max - self._min)))
+
+    # ---- 动画属性 ----
+    def _get_hover_t(self):
+        return self._hover_t
+
+    def _set_hover_t(self, value):
+        self._hover_t = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    hover_t = pyqtProperty(float, _get_hover_t, _set_hover_t)
+
+    def _glide(self, target):
+        self._anim.stop()
+        self._anim.setStartValue(self._hover_t)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    # ---- 绘制 ----
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        cy = self.height() / 2.0
+        left, right = self.SIDE, self.width() - self.SIDE
+        knob_x = self._x_for(self._value)
+
+        # 1) 刻度点：走过的档位转金，未到的保持浅灰
+        p.setPen(Qt.NoPen)
+        steps = self._max - self._min
+        for i in range(steps + 1):
+            x = left + (right - left) * (i / float(steps) if steps else 0.0)
+            passed = (self._min + i) <= self._value
+            p.setBrush(QColor(176, 142, 79, 165) if passed else QColor(206, 197, 176, 150))
+            p.drawEllipse(QPointF(x, cy), 1.3, 1.3)
+
+        # 2) 轨道
+        track = QRectF(left, cy - self.TRACK_H / 2.0, right - left, self.TRACK_H)
+        p.setBrush(QColor('#DED5C2'))
+        p.drawRoundedRect(track, self.TRACK_H / 2.0, self.TRACK_H / 2.0)
+
+        # 3) 已选段：左浅金 → 右深金
+        if knob_x - left > 0.5:
+            fill = QRectF(left, track.top(), knob_x - left, track.height())
+            grad = QLinearGradient(fill.topLeft(), fill.topRight())
+            grad.setColorAt(0.0, QColor('#D8C395'))
+            grad.setColorAt(1.0, QColor('#A8873F'))
+            p.setBrush(QBrush(grad))
+            p.drawRoundedRect(fill, self.TRACK_H / 2.0, self.TRACK_H / 2.0)
+
+        # 4) 滑块：落影 + 象牙白渐变 + 金字描边；悬停时先扩散一圈光晕
+        r = self.HANDLE_R
+        glow = max(self._hover_t, 1.0 if self._dragging else 0.0)
+        if glow > 0.02:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(176, 142, 79, int(38 * glow)))
+            p.drawEllipse(QPointF(knob_x, cy), r + 4.0, r + 4.0)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(92, 74, 40, 40))
+        p.drawEllipse(QPointF(knob_x, cy + 1.1), r, r)
+
+        knob = QLinearGradient(QPointF(knob_x, cy - r), QPointF(knob_x, cy + r))
+        knob.setColorAt(0.0, QColor('#FFFFFF'))
+        knob.setColorAt(1.0, QColor('#F3ECDC'))
+        p.setBrush(QBrush(knob))
+        p.setPen(QPen(QColor(168, 135, 63, 210), 1.2))
+        p.drawEllipse(QPointF(knob_x, cy), r, r)
+
+        # 5) 键盘焦点环：只在 Tab 聚焦时出现
+        if self.hasFocus():
+            pen = QPen(QColor(168, 135, 63, 150))
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(1.5, 1.5, self.width() - 3.0, self.height() - 3.0), 6, 6)
+        p.end()
+
+    # ---- 交互 ----
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self.setFocus(Qt.MouseFocusReason)
+            self.setValue(self._value_at(event.x()))
+            self.update()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.setValue(self._value_at(event.x()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self.setValue(self._value_at(event.x()))
+            self.update()
+            self.released.emit(self._value)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key_Left, Qt.Key_Down):
+            self.setValue(self._value - 1)
+        elif key in (Qt.Key_Right, Qt.Key_Up):
+            self.setValue(self._value + 1)
+        elif key == Qt.Key_Home:
+            self.setValue(self._min)
+        elif key == Qt.Key_End:
+            self.setValue(self._max)
+        else:
+            super().keyPressEvent(event)
+            return
+        self.released.emit(self._value)      # 键盘调整视为一次完整操作，直接落盘
+        event.accept()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self._glide(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        if not self._dragging:
+            self._glide(0.0)
+        super().leaveEvent(event)
+
+
 class SettingsDialog(QDialog):
     """
-    设置面板（v1.10.0 起）。
+    设置面板（v1.10.0 起；v1.12.0 增加全局字体）。
 
-    刻意做小（400×250）：只放真正会改变行为的开关，不摆"看起来丰富但不生效"的项。
-    没有「保存」按钮——开关改动即时写入，失败会回滚开关并说明原因；
-    因此面板本身不持有状态，每次都从注册表现读，外部改动也能如实反映。
+    宽度固定、高度随内容算：字号调到最大时说明会折行、预览会变高，
+    固定高度的对话框必然裁字。宽度固定是因为两列对齐靠它，宽度随字号变会显得跳。
+    没有「保存」按钮——开关与字体改动即时生效，失败会回滚并说明原因。
     """
 
-    WIDTH = 400
-    HEIGHT = 224
+    WIDTH = 420
+    MIN_HEIGHT = 384
 
-    def __init__(self, parent=None, key_path=None, value_name=None):
+    def __init__(self, parent=None, key_path=None, value_name=None, on_font_changed=None):
         super().__init__(parent)
         self._key_path = key_path
         self._value_name = value_name
+        self._on_font_changed = on_font_changed
 
         self.setObjectName('settingsPanel')
         # 标题栏写项目名，面板内标题写「设置」——避免两处都是"设置"造成重复
         self.setWindowTitle('一键多启 · 设置')
-        self.setFixedSize(self.WIDTH, self.HEIGHT)
+        self.setFixedWidth(self.WIDTH)
         self.setWindowFlags((self.windowFlags() | Qt.WindowCloseButtonHint)
                             & ~Qt.WindowContextHelpButtonHint)
         self.setStyleSheet("""
             QDialog#settingsPanel { background-color: #EDE7DB; }
             QLabel#settingsTitle { color: #2E2A24; background: transparent; }
             QLabel#settingsHint { color: #8A8170; background: transparent; }
+            QLabel#fontRowLabel { color: #5C5446; background: transparent; }
+            QLabel#fontNote { color: #8A8170; background: transparent; }
+            QLabel#fontPreview {
+                color: #2B2721;
+                background: #FBF6EC;
+                border: 1px solid #EADFC8;
+                border-radius: 8px;
+                padding: 5px 10px;
+            }
+            QLabel#fontValue { color: #6B5A32; background: transparent; }
+            QComboBox {
+                background: #FFFDF8;
+                border: 1px solid #E1D6BF;
+                border-radius: 8px;
+                padding: 4px 10px;
+                color: #2B2721;
+                selection-background-color: #EFE6D2;
+            }
+            QComboBox:hover { border-color: #C0A76F; }
+            QComboBox:focus { border-color: #A8873F; }
+            QComboBox::drop-down { border: none; width: 22px; }
+            QComboBox QAbstractItemView {
+                background: #FFFDF8;
+                border: 1px solid #E1D6BF;
+                padding: 4px;
+                selection-background-color: #EFE6D2;
+                selection-color: #2B2721;
+                outline: none;
+            }
         """)
 
         title = QLabel('设置', self)
         title.setObjectName('settingsTitle')
-        title.setFont(ui_font(17, QFont.Bold, 'display', 0.3))
+        set_ui_font(title, 17, QFont.Bold, 'display', 0.3)
 
         enabled_now = autostart_state(key_path, value_name)[0]
         self.row_autostart = SettingRow(
@@ -1899,13 +2351,73 @@ class SettingsDialog(QDialog):
         if sys.platform != 'win32':
             self.row_autostart.set_enabled_state(False)
 
+        # ---- 字体卡片 ----
+        self.font_card = CardFrame(self)
+        card = QVBoxLayout(self.font_card)
+        card.setContentsMargins(18, 14, 18, 14)
+        card.setSpacing(9)
+
+        self.family_label = QLabel('字体搭配', self.font_card)
+        self.family_label.setObjectName('fontRowLabel')
+        set_ui_font(self.family_label, 12, QFont.DemiBold, 'text', 0.3)
+
+        self.family_combo = QComboBox(self.font_card)
+        set_ui_font(self.family_combo, 13, QFont.Normal, 'text', 0.2)
+        for preset in FONT_PRESETS:
+            label = preset['name'] + ('（默认）' if preset['key'] == FONT_PRESETS[0]['key'] else '')
+            self.family_combo.addItem(label, preset['key'])
+            self.family_combo.setItemData(self.family_combo.count() - 1, preset['note'],
+                                          Qt.ToolTipRole)
+        self.family_combo.setCurrentIndex(
+            max(0, [p['key'] for p in FONT_PRESETS].index(FontPrefs.KEY)))
+
+        family_row = QHBoxLayout()
+        family_row.setContentsMargins(0, 0, 0, 0)
+        family_row.setSpacing(10)
+        family_row.addWidget(self.family_label, 0, Qt.AlignVCenter)
+        family_row.addWidget(self.family_combo, 1)
+
+        self.family_note = QLabel('', self.font_card)
+        self.family_note.setObjectName('fontNote')
+        set_ui_font(self.family_note, 11, QFont.Normal, 'text')
+        # 换行而不是裁字：字号调到 17px 时这一行会超过卡片宽度，
+        # 宁可多一行高度（对话框会跟着长），也不要出现半截字。
+        self.family_note.setWordWrap(True)
+
+        self.preview = QLabel('一键多启 · LaunchForge 2026', self.font_card)
+        self.preview.setObjectName('fontPreview')
+        set_ui_font(self.preview, 15, QFont.DemiBold, 'display', 0.3)
+
+        self.size_label = QLabel('字号', self.font_card)
+        self.size_label.setObjectName('fontRowLabel')
+        set_ui_font(self.size_label, 12, QFont.DemiBold, 'text', 0.3)
+
+        self.size_slider = SizeSlider(FONT_SIZE_MIN, FONT_SIZE_MAX, FontPrefs.SIZE,
+                                      self.font_card)
+        self.size_value = QLabel('', self.font_card)
+        self.size_value.setObjectName('fontValue')
+        self.size_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        set_ui_font(self.size_value, 12, QFont.DemiBold, 'text', 0.2)
+
+        size_row = QHBoxLayout()
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(10)
+        size_row.addWidget(self.size_label, 0, Qt.AlignVCenter)
+        size_row.addWidget(self.size_slider, 1, Qt.AlignVCenter)
+        size_row.addWidget(self.size_value, 0, Qt.AlignVCenter)
+
+        card.addLayout(family_row)
+        card.addWidget(self.family_note)
+        card.addWidget(self.preview)
+        card.addLayout(size_row)
+
         self.hint = QLabel('', self)
         self.hint.setObjectName('settingsHint')
-        self.hint.setFont(ui_font(11, QFont.Normal, 'text'))
-        self.hint.setWordWrap(False)
+        set_ui_font(self.hint, 11, QFont.Normal, 'text')
+        self.hint.setWordWrap(True)
 
         self.btn_close = PillButton('关闭', compact=True)
-        self.btn_close.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self._close_dialog)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -1917,11 +2429,94 @@ class SettingsDialog(QDialog):
         layout.setSpacing(12)
         layout.addWidget(title)
         layout.addWidget(self.row_autostart)
+        layout.addWidget(self.font_card)
         layout.addWidget(self.hint)
         layout.addStretch(1)
         layout.addLayout(footer)
 
+        # 信号放在控件就绪之后连，避免初始化期间触发一次多余的重建
+        self.family_combo.currentIndexChanged.connect(self._on_family_changed)
+        self.size_slider.valueChanged.connect(self._on_size_changed)
+        self.size_slider.released.connect(self._on_size_released)
+
+        self._sync_font_controls()
+        self._fit_height()
         self.refresh()
+
+    # ---- 字体：选择与即时生效 ----
+    def _on_family_changed(self, index):
+        key = self.family_combo.itemData(index)
+        if not key or key == FontPrefs.KEY:
+            return
+        FontPrefs.set(key=key)
+        log.info('字体搭配切换为：%s（%s）', FontPrefs.preset()['name'], FontPrefs.KEY)
+        self._apply_fonts(persist=True)
+
+    def _on_size_changed(self, value):
+        FontPrefs.set(size=value)
+        # 拖动过程中只刷新界面，不写盘：一次拖动会经过 6 个档位，没必要存 6 次
+        self._apply_fonts(persist=False)
+
+    def _on_size_released(self, value):
+        FontPrefs.set(size=value)
+        self._apply_fonts(persist=True)
+
+    def _apply_fonts(self, persist):
+        """重建本面板字体 → 同步控件尺寸 → 重算对话框高度 → （可选）落盘。"""
+        restyle_widgets(self)
+        self.row_autostart.sync_height()
+        self._sync_font_controls()
+        self._fit_height()
+        if persist:
+            self._persist()
+
+    def _sync_font_controls(self):
+        """与字体相关的文案与几何，统一在这里对齐，避免改字号后标签被裁。"""
+        preset = FontPrefs.preset()
+        if FontPrefs.available():
+            note = preset['note'] + ' · 本机可用'
+        else:
+            note = preset['note'] + ' · 未安装，回退到 ' + FontPrefs.fallback_name()
+        self.family_note.setText(note)
+        self.family_note.setToolTip(note)
+
+        self.size_value.setText('%d px' % FontPrefs.SIZE)
+        fm = self.size_value.fontMetrics()
+        self.size_value.setFixedWidth(fm.horizontalAdvance('00 px') + 10)
+
+        self.family_combo.setMinimumHeight(
+            max(32, self.family_combo.fontMetrics().height() + 14))
+        if self.size_slider.value() != FontPrefs.SIZE:
+            self.size_slider.setValue(FontPrefs.SIZE, emit=False)
+
+    def _fit_height(self):
+        """
+        高度取布局的真实需求，宽度固定。
+
+        `heightForWidth` 必须显式问一次：说明文字会折行，`sizeHint()` 只按单行给高度，
+        17px 字号下就会把最后一行压在边框外——这正是要避免的"越界"。
+        """
+        layout = self.layout()
+        layout.activate()
+        width = self.WIDTH - 36
+        need = layout.sizeHint().height()
+        if layout.hasHeightForWidth():
+            need = max(need, layout.heightForWidth(width))
+        screen = QApplication.desktop().availableGeometry(self)
+        limit = max(self.MIN_HEIGHT, screen.height() - 80)
+        self.setFixedSize(self.WIDTH, int(min(max(self.MIN_HEIGHT, need), limit)))
+
+    def _persist(self):
+        if self._on_font_changed is not None:
+            self._on_font_changed()
+
+    def _close_dialog(self):
+        self._persist()      # 关闭前再存一次，保证拖到一半直接关窗也不丢
+        self.accept()
+
+    def closeEvent(self, event):
+        self._persist()
+        super().closeEvent(event)
 
     # ---- 状态同步 ----
     def refresh(self):
@@ -1988,8 +2583,16 @@ class ListRowDelegate(QStyledItemDelegate):
         self._view = view
         self._font = ui_font(13, QFont.Normal, 'text', 0.2)
 
+    def refresh_font(self):
+        """全局字号/搭配变化后重建画笔字体（delegate 不是 QWidget，走不到 restyle）。"""
+        self._font = ui_font(13, QFont.Normal, 'text', 0.2)
+
+    def row_height(self):
+        # 字号 17px 时文字约 23px 高，34 仍放得下；再大也不会被裁，因为这里会撑高
+        return max(self.ROW_HEIGHT, self._font.pixelSize() + 17)
+
     def sizeHint(self, option, index):
-        return QSize(0, self.ROW_HEIGHT)
+        return QSize(0, self.row_height())
 
     def paint(self, painter, option, index):
         row = index.row()
@@ -2083,7 +2686,11 @@ class ListRowDelegate(QStyledItemDelegate):
             p.setBrush(QColor(192, 80, 60, 28))
             p.drawPath(tri)
             p.setPen(QColor('#C0503C'))
-            p.setFont(ui_font(9, QFont.Bold, 'text'))
+            # 图标是 18×18 的固定几何，感叹号不跟随全局字号缩放，否则会顶出三角
+            glyph_font = QFont(self._font)
+            glyph_font.setPixelSize(9)
+            glyph_font.setWeight(QFont.Bold)
+            p.setFont(glyph_font)
             p.drawText(QRectF(box.left(), box.bottom() - 8.5, box.width(), 8.5),
                        Qt.AlignCenter, '!')
 
@@ -2130,6 +2737,14 @@ class AnimatedList(QListWidget):
 
     def select_value(self, row):
         return self._select_val.get(row, 0.0)
+
+    def refresh_row_fonts(self):
+        """全局字号/搭配变化：重建 delegate 字体并按新行高重排。"""
+        delegate = self.itemDelegate()
+        if isinstance(delegate, ListRowDelegate):
+            delegate.refresh_font()
+        self.doItemsLayout()
+        self.viewport().update()
 
     # ---- 补间 ----
     def _on_item_entered(self, item):
@@ -2226,10 +2841,10 @@ class LauncherWindow(QMainWindow):
 
         # 预设行
         self.preset_label = QLabel('预设方案')
-        self.preset_label.setFont(ui_font(12, QFont.DemiBold, 'text', 0.4))
+        set_ui_font(self.preset_label, 12, QFont.DemiBold, 'text', 0.4)
         self.preset_combo = QComboBox()
         self.preset_combo.setEditable(False)
-        self.preset_combo.setFont(ui_font(13, QFont.Normal, 'text', 0.2))
+        set_ui_font(self.preset_combo, 13, QFont.Normal, 'text', 0.2)
         self.preset_combo.setMinimumHeight(30)
         self.btn_new_preset = PillButton('新建', compact=True)
         self.btn_del_preset = PillButton('删除', compact=True)
@@ -2286,11 +2901,10 @@ class LauncherWindow(QMainWindow):
         # 宽度规则（REQ-009）：同一排左右等宽，且上排与下排取同一个值，
         # 这样左右成对一致、上下关于中线镜像，整体才是对称的。
         self.taiji = TaijiLaunchButton(160)
+        # 圆盘只吃家族、字号自绘（跟着盘面直径走），所以这里给 display 角色
+        set_ui_font(self.taiji, 13, QFont.DemiBold, 'display')
         pills_height = self.taiji.height()
-        w_outer = max(btn.sizeHint().width() for btn in
-                      (self.btn_add_folder, self.btn_del, self.btn_add_path, self.btn_settings))
-        w_mid = max(btn.sizeHint().width() for btn in (self.btn_add, self.btn_log))
-        row_widths = [w_outer, w_mid, w_outer]
+        row_widths = self._pill_widths()
 
         self.left_pills = PillColumn(
             [self.btn_add_folder, self.btn_add, self.btn_add_path],
@@ -2388,6 +3002,47 @@ class LauncherWindow(QMainWindow):
         # 说明：不在此处做任何自动启动。启动器打开时只呈现界面，
         # 必须由用户点击「🚀 一键启动」才会运行列表内的条目。
 
+    # ---- 全局字体 ----
+    def _pill_widths(self):
+        """
+        按当前字体算三排胶囊的宽度。
+
+        规则（REQ-009）：同一排左右等宽，上下两排取同一个值——左右成对、上下镜像。
+        字号一变，文本宽度就变，所以这组值不能只算一次。
+        """
+        w_outer = max(btn.sizeHint().width() for btn in
+                      (self.btn_add_folder, self.btn_del, self.btn_add_path, self.btn_settings))
+        w_mid = max(btn.sizeHint().width() for btn in (self.btn_add, self.btn_log))
+        return [w_outer, w_mid, w_outer]
+
+    def apply_font_prefs(self, save=False):
+        """
+        让主窗口整体跟上当前字体偏好（字号/搭配）。
+
+        为什么不重建窗口：`launched_items` 里记着"文件类条目 → 关联程序 PID"，
+        重建会丢这份状态，导致改个字号之后关不掉刚打开的文件。
+        走"按 spec 重建字体 + 重算胶囊宽度 + 重排行高"这条路，状态一点不动。
+        """
+        restyled = restyle_widgets(self)
+        self.preset_combo.setMinimumHeight(
+            max(30, self.preset_combo.fontMetrics().height() + 12))
+        self.list_widget.refresh_row_fonts()
+
+        widths = self._pill_widths()
+        self.left_pills.set_widths(widths)
+        self.right_pills.set_widths(widths)
+
+        layout = self.centralWidget().layout()
+        if layout is not None:
+            layout.activate()
+        # 只放大不缩小：字号调回去时窗口保持用户可能已经拖过的尺寸，不突然缩一下
+        hint = self.minimumSizeHint()
+        self.resize(max(self.width(), hint.width()), max(self.height(), hint.height()))
+        self.update()
+        if save:
+            self.save_config()
+        log.info('全局字体已应用：%s %dpx（重建字体 %d 处）',
+                 FontPrefs.preset()['name'], FontPrefs.SIZE, restyled)
 
     def _get_all_pids(self):
         """返回当前系统所有进程PID的集合"""
@@ -3261,11 +3916,16 @@ class LauncherWindow(QMainWindow):
 
         面板本身不保存状态：每次打开都从注册表现读，开关改动即时写入。
         这样即使有人手动删掉 Run 键，界面也不会残留"已开启"的假象。
+        字体同理：偏好只有 `FontPrefs` 一份，改完立刻回灌主窗口并落盘。
         """
         log.info('用户打开设置面板')
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, on_font_changed=self.on_font_changed)
         dialog.exec_()
         log.info('设置面板已关闭')
+
+    def on_font_changed(self):
+        """设置面板改了字体：主窗口即时跟随，并写入配置（下次启动照样生效）。"""
+        self.apply_font_prefs(save=True)
 
 
     def open_log_dir(self):
@@ -3306,6 +3966,8 @@ class LauncherWindow(QMainWindow):
             # settings 存放界面偏好；last_folder 用于选择框定位与手动输入默认值
             'settings': {
                 'last_folder': self.last_folder,
+                'font_key': FontPrefs.KEY,
+                'font_size': FontPrefs.SIZE,
             },
         }
         try:
@@ -3318,6 +3980,7 @@ class LauncherWindow(QMainWindow):
             self.presets = {'默认方案': []}
             self.current_preset_name = '默认方案'
             self.last_folder = ''
+            FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
             return
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -3341,13 +4004,18 @@ class LauncherWindow(QMainWindow):
             settings = data.get('settings', {})
             if isinstance(settings, dict):
                 self.last_folder = normalize_input_path(settings.get('last_folder', ''))
+                # 字体：必须在任何 ui_font() 调用之前恢复，否则首屏会用默认字体画一遍
+                FontPrefs.set(settings.get('font_key', FontPrefs.KEY),
+                              settings.get('font_size', FONT_SIZE_BASE))
             else:
                 self.last_folder = ''
+                FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
         except Exception as e:
             QMessageBox.warning(self, '加载失败', f'配置文件读取失败：\n{e}\n将使用默认设置。')
             self.presets = {'默认方案': []}
             self.current_preset_name = '默认方案'
             self.last_folder = ''
+            FontPrefs.set(FONT_PRESETS[0]['key'], FONT_SIZE_BASE)
 
     def closeEvent(self, event):
         self.save_config()

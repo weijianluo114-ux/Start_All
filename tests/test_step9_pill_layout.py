@@ -134,7 +134,7 @@ class FakeSettingsDialog:
     """替掉真实模态面板：只要确认被打开，且打开本身不改配置。"""
     instances = []
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, **kwargs):
         FakeSettingsDialog.instances.append(parent)
 
     def exec_(self):

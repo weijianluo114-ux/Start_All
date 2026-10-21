@@ -114,9 +114,10 @@ try:
     print("[8] 面板初始状态 = %s（与注册表一致）" % dlg.row_autostart.is_checked())
 
     size = (dlg.width(), dlg.height())
-    assert size == (launchforge.SettingsDialog.WIDTH, launchforge.SettingsDialog.HEIGHT)
-    assert size[0] <= 460 and size[1] <= 280, '设置窗口应保持小尺寸：%s' % (size,)
-    print("[9] 窗口尺寸 = %dx%d（受限）" % size)
+    assert size[0] == launchforge.SettingsDialog.WIDTH
+    # v1.12.0 起面板多了一张字体卡片，高度由内容算出（不再有固定 HEIGHT）
+    assert size[0] <= 460 and 380 <= size[1] <= 520, '设置窗口尺寸失控：%s' % (size,)
+    print("[9] 窗口尺寸 = %dx%d（宽度固定，高度随内容）" % size)
 
     # 内容不溢出：提示行与关闭按钮都要落在可视区内
     # 未 show 时布局不会生效，y 值还是构造时的默认值，必须先激活布局
