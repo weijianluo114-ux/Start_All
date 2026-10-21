@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="120" alt="LaunchForge"></p>
+
 # 一键多启 · LaunchForge
 
 [![build](https://github.com/weijianluo114-ux/Start_All/actions/workflows/build.yml/badge.svg)](https://github.com/weijianluo114-ux/Start_All/actions/workflows/build.yml)
@@ -105,7 +107,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.14.2 ^
+    --name LaunchForge_v1.15.0 ^
     src\launchforge.py
 ```
 
@@ -130,6 +132,7 @@ python test_step14_taiji_text.py
 python test_step15_i18n.py
 python test_step16_focus_ring.py
 python test_step17_bat_spawn_safety.py
+python test_step18_brand_icon.py
 pythonw test_step6_no_console_flash.py
 ```
 
@@ -305,7 +308,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.14.2 ^
+    --name LaunchForge_v1.15.0 ^
     src\launchforge.py
 ```
 
@@ -332,6 +335,7 @@ python test_step14_taiji_text.py
 python test_step15_i18n.py
 python test_step16_focus_ring.py
 python test_step17_bat_spawn_safety.py
+python test_step18_brand_icon.py
 pythonw test_step6_no_console_flash.py
 ```
 

@@ -75,7 +75,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.14.2'
+APP_VERSION = '1.15.0'
 
 # 启动 .bat/.cmd 后等待多久再采集父子快照。
 # 这个窗口只影响"能不能抓到刚起来的子进程"，**不再是**归属判据——
