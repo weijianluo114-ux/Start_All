@@ -75,7 +75,12 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.14.1'
+APP_VERSION = '1.14.2'
+
+# 启动 .bat/.cmd 后等待多久再采集父子快照。
+# 这个窗口只影响"能不能抓到刚起来的子进程"，**不再是**归属判据——
+# 归属靠父子链（见 _spawned_processes），所以窗口内别的程序启动不会被误记（BUG-007）。
+SPAWN_WINDOW_SECONDS = 2.0
 
 log = logging.getLogger('launchforge')
 
@@ -487,6 +492,86 @@ def find_pids_by_commandline(path):
         except Exception:
             pass
     return hits
+
+
+def process_snapshot():
+    """
+    一次 WMI 全量进程快照：{pid: {'ppid': 父 PID, 'name': 镜像名, 'created': 创建时间}}。
+
+    为什么需要父进程号：`.bat` / `.cmd` 的"伴生进程"只能靠**父子关系**归属。
+    旧实现用"启动前后全局 PID 差集"（见 BUG-007），同一时间窗内任何无关程序启动
+    都会被算成脚本的子进程，关闭时就被强制结束。父子链是唯一能"证明"归属的证据。
+
+    Windows 在父进程退出后仍保留子进程里记录的 ParentProcessId，因此脚本已经跑完
+    也照样能回溯出它启动过哪些进程——这是这套判据成立的前提。
+
+    失败返回空字典（调用方一律按"拿不到证据"处理，绝不退化成全局差集）。
+    """
+    if sys.platform != 'win32':
+        return {}
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        log.warning('缺少 pywin32，无法读取进程父子关系')
+        return {}
+
+    snapshot = {}
+    pythoncom.CoInitialize()
+    try:
+        wmi = win32com.client.GetObject('winmgmts:')
+        for proc in wmi.ExecQuery(
+                'SELECT ProcessId, ParentProcessId, Name, CreationDate FROM Win32_Process'):
+            try:
+                pid = int(proc.ProcessId)
+            except Exception:
+                continue
+            snapshot[pid] = {
+                'ppid': int(getattr(proc, 'ParentProcessId', 0) or 0),
+                'name': proc.Name or '',
+                'created': str(getattr(proc, 'CreationDate', '') or ''),
+            }
+    except Exception:
+        log.exception('读取进程快照失败')
+        return {}
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+    return snapshot
+
+
+def descendants_of(root_pid, snapshot, max_depth=12):
+    """
+    返回由 root_pid 派生的全部 PID（不含 root 自己），按父子链逐层扩展。
+
+    只看"父进程号是否在已知集合里"，因此能跨多级（cmd → 启动器 → 真正的程序）。
+    不做"新出现的 PID 都算"这类近似——那正是 BUG-007 误杀无关应用的来源。
+    """
+    if not root_pid or not snapshot:
+        return set()
+    found, frontier = set(), {int(root_pid)}
+    for _ in range(max_depth):
+        if not frontier:
+            break
+        nxt = set()
+        for pid, info in snapshot.items():
+            if info.get('ppid') in frontier and pid not in found:
+                found.add(pid)
+                nxt.add(pid)
+        frontier = nxt
+    return found
+
+
+# 这些进程即使被错误地归到脚本名下也绝不能结束（防御性黑名单）。
+# 正常情况下父子链不会把它们算进来，但一行判断换来"最坏也不会杀掉外壳"。
+PROTECTED_IMAGES = frozenset({
+    'explorer.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe',
+    'lsass.exe', 'smss.exe', 'svchost.exe', 'dwm.exe', 'sihost.exe', 'ctfmon.exe',
+    'taskhostw.exe', 'fontdrvhost.exe', 'runtimebroker.exe', 'searchhost.exe',
+    'startmenuexperiencehost.exe', 'shellexperiencehost.exe', 'textinputhost.exe',
+})
 
 
 def launch_program(path):
@@ -3504,22 +3589,39 @@ class LauncherWindow(QMainWindow):
         self.preset_combo.blockSignals(False)
         log.info('默认预设名随语言改为：%s', target)
 
-    def _get_all_pids(self):
-        """返回当前系统所有进程PID的集合"""
-        try:
-            output = subprocess.check_output(
-                ['tasklist', '/fo', 'csv', '/nh'],
-                **hidden_subprocess_kwargs()).decode('gbk')
-            pids = set()
-            for line in output.splitlines():
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    pid_str = parts[1].strip('"')
-                    if pid_str.isdigit():
-                        pids.add(int(pid_str))
-            return pids
-        except Exception:
-            return set()
+    def _spawned_processes(self, root_pid, before, after):
+        """
+        找出"这个脚本真正启动的进程"，返回 (pid 列表, {pid: (镜像名, 创建时间)})。
+
+        判据只有一条：**父链能从脚本进程（cmd）追溯上来**。
+        以前用的是"启动前后全局 PID 差集"，两秒窗口内用户手动打开的程序也会被算进来，
+        关闭时就被 taskkill 掉（BUG-007）；父子链不会把无关进程扯进来。
+
+        拿不到 root_pid 或快照时返回空——宁可少关，也不能错杀。
+        """
+        if not root_pid:
+            log.warning('脚本未取得 cmd PID，无法确认伴生进程，本次不记录任何 PID')
+            return [], {}
+        if not after:
+            log.warning('进程快照读取失败，本次不记录伴生进程')
+            return [], {}
+
+        owned, meta = [], {}
+        self_pid = os.getpid()
+        for pid in sorted(descendants_of(root_pid, after)):
+            info = after.get(pid) or {}
+            name = info.get('name') or ''
+            if pid == self_pid or pid == int(root_pid):
+                continue
+            if name.lower() in PROTECTED_IMAGES:
+                log.info('伴生进程 %s(pid=%s) 属于系统外壳，已忽略', name, pid)
+                continue
+            # 启动前就存在的进程不可能是这次派生的（防 cmd PID 被复用）
+            if pid in before:
+                continue
+            owned.append(pid)
+            meta[pid] = (name, info.get('created') or '')
+        return owned, meta
 
 
     def on_item_double_clicked(self, item):
@@ -3532,7 +3634,7 @@ class LauncherWindow(QMainWindow):
             result = launch_program(path)
             if result:
                 proc, resolved = result
-                self.launched_items.append((proc, resolved, self.current_preset_name, []))
+                self.launched_items.append((proc, resolved, self.current_preset_name, [], {}))
         except Exception as e:
             QMessageBox.warning(self, t('msg.launch_failed'), str(e))
 
@@ -3734,22 +3836,30 @@ class LauncherWindow(QMainWindow):
                     folders.append(path)          # 文件夹延后统一打开，避免弹出多个窗口
                     continue
                 ext = os.path.splitext(path)[1].lower()
-                extra_pids = []
+                extra_pids, spawn_meta = [], {}
                 if ext in ('.bat', '.cmd'):
-                    # 批处理会启动子进程，用启动前后的 PID 差集来捕获
-                    before = self._get_all_pids()
+                    # 批处理会派生子进程，但**不能**用"全局 PID 差集"抓（BUG-007）：
+                    # 同一时间窗内用户自己开的程序也会落进差集，关闭时被误杀。
+                    # 改为只收"父链能从 cmd 追溯上来"的进程。
+                    before = process_snapshot()
                     result = launch_program(path)
+                    root_pid = getattr(result[0], 'pid', None) if result else None
 
-                    time.sleep(2)
-                    after = self._get_all_pids()
-                    extra_pids = list(after - before)
+                    time.sleep(SPAWN_WINDOW_SECONDS)
+                    after = process_snapshot()
+                    extra_pids, spawn_meta = self._spawned_processes(root_pid, before, after)
+                    log.info('脚本 %s：cmd pid=%s，归属到 %d 个伴生进程 %s',
+                             get_display_name(path), root_pid, len(extra_pids),
+                             [(pid, spawn_meta[pid][0]) for pid in extra_pids])
                     if result:
                         proc, resolved = result
                         with self._launch_lock:
-                            self.launched_items.append((proc, resolved, preset_name, extra_pids))
+                            self.launched_items.append(
+                                (proc, resolved, preset_name, extra_pids, spawn_meta))
                     else:
                         with self._launch_lock:
-                            self.launched_items.append((None, path, preset_name, extra_pids))
+                            self.launched_items.append(
+                                (None, path, preset_name, extra_pids, spawn_meta))
                 else:
 
                     try:
@@ -3760,7 +3870,7 @@ class LauncherWindow(QMainWindow):
                             log.info('启动成功：%s → pid=%s（解析为 %s）',
                                      path, getattr(proc, 'pid', None), resolved)
                             with self._launch_lock:
-                                self.launched_items.append((proc, resolved, preset_name, []))
+                                self.launched_items.append((proc, resolved, preset_name, [], {}))
                         else:
                             log.info('启动完成但未取得 PID：%s（由系统关联程序打开）', path)
                     except Exception:
@@ -4252,6 +4362,75 @@ class LauncherWindow(QMainWindow):
             pass
         return False, ''
 
+    @staticmethod
+    def _pid_identity(pid):
+        """
+        返回 (是否存活, 镜像名, 创建时间)。
+
+        比 tasklist 多问一个创建时间：判断"这个 PID 还是不是当初那个进程"，
+        光看镜像名不够——cmd.exe / python.exe 这种同名进程到处都是，
+        PID 被复用后照样同名，只有创建时间能区分（BUG-007）。
+        """
+        if sys.platform != 'win32':
+            return False, '', ''
+        try:
+            import pythoncom
+            import win32com.client
+        except ImportError:
+            # 没有 WMI 就判不出"是不是同一个进程"，一律跳过（安全优先）
+            log.warning('缺少 pywin32，无法校验伴生进程归属，跳过 pid=%s', pid)
+            return False, '', ''
+
+        pythoncom.CoInitialize()
+        try:
+            wmi = win32com.client.GetObject('winmgmts:')
+            for proc in wmi.ExecQuery(
+                    'SELECT Name, CreationDate FROM Win32_Process WHERE ProcessId=%d'
+                    % int(pid)):
+                return True, (proc.Name or ''), str(getattr(proc, 'CreationDate', '') or '')
+        except Exception:
+            log.debug('读取进程 %s 的创建时间失败', pid, exc_info=True)
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+        return False, '', ''
+
+    def _spawn_still_same(self, pid, spawn_meta):
+        """
+        确认伴生 PID 仍是"当初由脚本启动的那个进程"。
+
+        脚本执行完会退出，它的 PID 可能被系统分给别的程序；此时闭眼
+        `taskkill /pid` 就会杀掉一个毫不相干的进程——这正是 BUG-007 的另一半。
+        判据：镜像名相同 + 创建时间相同，任一不符即跳过。
+        """
+        if int(pid) == os.getpid():
+            log.warning('伴生 pid=%s 就是启动器自身，跳过', pid)
+            return False
+        expected = (spawn_meta or {}).get(int(pid))
+        alive, name, created = self._pid_identity(pid)
+        if not alive:
+            log.info('伴生 pid=%s 已自行退出，跳过', pid)
+            return False
+        if (name or '').lower() in PROTECTED_IMAGES:
+            log.warning('伴生 pid=%s 现为系统外壳 %s，跳过', pid, name)
+            return False
+        if not expected:
+            # 没有归属元数据就无法证明它是脚本启动的，宁可跳过
+            log.warning('伴生 pid=%s 缺少归属记录，跳过（避免误杀）', pid)
+            return False
+        exp_name, exp_created = expected
+        if exp_name and name and exp_name.lower() != name.lower():
+            log.warning('伴生 pid=%s 现属于 %s（记录为 %s），疑似 PID 复用，跳过',
+                        pid, name, exp_name)
+            return False
+        if exp_created and created and exp_created != created:
+            log.warning('伴生 pid=%s 创建时间与记录不符（%s ≠ %s），疑似 PID 复用，跳过',
+                        pid, created, exp_created)
+            return False
+        return True
+
     def _kill_target(self, path, image, pids=None):
         """
         关闭单个目标，按四层优先级：
@@ -4283,7 +4462,9 @@ class LauncherWindow(QMainWindow):
         launched = self._find_launched(path)
 
         if launched is not None:
-            proc, _target, _preset, extra_pids = launched
+            # 兼容旧的四元组记录（本次会话内不会出现，但测试与热更新场景可能）
+            proc, _target, _preset, extra_pids = launched[:4]
+            spawn_meta = launched[4] if len(launched) > 4 else {}
             pid = getattr(proc, 'pid', None) if proc else None
             if pid:
                 alive, alive_name = self._pid_info(pid)
@@ -4305,8 +4486,13 @@ class LauncherWindow(QMainWindow):
                     log.info('%s：记录 PID %s 已失效（多为单实例应用转交给已有进程）',
                              get_display_name(path), pid)
             for ep in (extra_pids or []):
+                # 伴生 PID 必须"还是当初那个进程"才允许结束（BUG-007）：
+                # 脚本跑完后它的 PID 可能已被系统复用，闭眼 taskkill 会杀掉别人的程序。
+                if not self._spawn_still_same(ep, spawn_meta):
+                    result['steps'].append(('spawn-skip', ep, False, 0))
+                    continue
                 ok, rc, out = self._taskkill(['/f', '/t', '/pid', str(ep)])
-                result['steps'].append(('pid', ep, ok, rc))
+                result['steps'].append(('spawn', ep, ok, rc))
                 if self._is_access_denied(out):
                     result['denied'] = True
 
