@@ -76,6 +76,26 @@ class FakeMessageBox:
 
 launchforge.QMessageBox = FakeMessageBox
 
+
+class FakeNotice:
+    """捕获「5 秒自关」轻提示（v1.16.0 起，关闭全部成功时不再走 information）。"""
+    msgs = []
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    finished = _Sig()
+
+    def __init__(self, parent, msg, seconds=5):
+        FakeNotice.msgs.append(msg)
+
+    def popup(self):
+        return self
+
+
+launchforge.AutoCloseNotice = FakeNotice
+
 src_ping = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "ping.exe")
 for p in (PROBE, DEAD_PROBE):
     if not os.path.exists(p):
@@ -117,8 +137,9 @@ print("[3] 关闭后探针存活 = %s（应为 False）" % (proc.poll() is None)
 assert proc.poll() is not None, "镜像名兜底未生效：进程仍在运行（这是修复前的表现）"
 
 info = [c for c in FakeMessageBox.calls if c[0] == "information"]
-print("[4] 结果弹窗 = %r" % (info[-1][2].replace("\n", " | ") if info else ""))
-assert info and "已关闭 1 个程序" in info[-1][2], "应统计为已关闭 1 个"
+result_text = info[-1][2] if info else (FakeNotice.msgs[-1] if FakeNotice.msgs else "")
+print("[4] 结果提示 = %r" % result_text.replace("\n", " | "))
+assert "已关闭 1 个程序" in result_text, "应统计为已关闭 1 个（提示路径断了？）"
 
 # 日志内容核对
 log_text = ""

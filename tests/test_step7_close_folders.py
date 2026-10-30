@@ -78,6 +78,26 @@ class FakeMessageBox:
 
 launchforge.QMessageBox = FakeMessageBox
 
+
+class FakeNotice:
+    """捕获「5 秒自关」轻提示（v1.16.0 起，关闭全部成功时不再走 information）。"""
+    msgs = []
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    finished = _Sig()
+
+    def __init__(self, parent, msg, seconds=5):
+        FakeNotice.msgs.append(msg)
+
+    def popup(self):
+        return self
+
+
+launchforge.AutoCloseNotice = FakeNotice
+
 A = os.path.join(WORK, "Alpha")
 B = os.path.join(WORK, "Bravo")
 C = os.path.join(WORK, "Charlie")      # 不在列表内，用于"无关窗口"与"混合标签"
@@ -172,8 +192,9 @@ assert gone, "确认后 A/B 窗口未关闭"
 assert has_window(C), "列表外的窗口 C 被误关！"
 
 info = [c for c in FakeMessageBox.calls if c[0] == "information"]
-assert info and "文件夹窗口" in info[-1][2], "结果提示应包含窗口关闭数量"
-print("    结果提示：%r" % info[-1][2].replace("\n", " | "))
+result_text = info[-1][2] if info else (FakeNotice.msgs[-1] if FakeNotice.msgs else "")
+assert "文件夹窗口" in result_text, "结果提示应包含窗口关闭数量（提示路径断了？）"
+print("    结果提示：%r" % result_text.replace("\n", " | "))
 
 import subprocess
 out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq explorer.exe", "/fo", "csv", "/nh"],

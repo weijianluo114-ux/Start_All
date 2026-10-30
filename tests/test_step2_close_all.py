@@ -67,6 +67,26 @@ class FakeMessageBox:
 
 launchforge.QMessageBox = FakeMessageBox
 
+
+class FakeNotice:
+    """捕获「5 秒自关」轻提示（v1.16.0 起，关闭全部成功时不再走 information）。"""
+    msgs = []
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    finished = _Sig()
+
+    def __init__(self, parent, msg, seconds=5):
+        FakeNotice.msgs.append(msg)
+
+    def popup(self):
+        return self
+
+
+launchforge.AutoCloseNotice = FakeNotice
+
 # 准备探针
 src_ping = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "ping.exe")
 for p in (ALIVE, IDLE):
@@ -121,10 +141,11 @@ while time.time() < deadline and proc.poll() is None:
     time.sleep(0.1)
 
 info = [c for c in FakeMessageBox.calls if c[0] == "information"]
+result_text = info[-1][2] if info else (FakeNotice.msgs[-1] if FakeNotice.msgs else "")
 print("[3] 确认场景：进程存活 = %s（应为 False）" % (proc.poll() is None))
 assert proc.poll() is not None, "确认后进程未被关闭！"
-print("    结果提示：%r" % (info[-1][2] if info else ""))
-assert "已关闭" in (info[-1][2] if info else "")
+print("    结果提示：%r" % result_text)
+assert "已关闭" in result_text, "结果提示里没有'已关闭'（提示路径断了？）"
 
 print("[4] 启动器是否被关闭 = %s（应为 False）" % closed["flag"])
 assert not closed["flag"], "关闭后不应退出启动器"

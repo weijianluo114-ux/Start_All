@@ -75,7 +75,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'launcher_presets.json')
 LOG_DIR = os.path.join(CONFIG_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'launcher.log')
 
-APP_VERSION = '1.15.0'
+APP_VERSION = '1.16.0'
 
 # 启动 .bat/.cmd 后等待多久再采集父子快照。
 # 这个窗口只影响"能不能抓到刚起来的子进程"，**不再是**归属判据——
@@ -2517,6 +2517,149 @@ class CardFrame(QWidget):
         p.end()
 
 
+class NoticeCard(QWidget):
+    """
+    轻提示的卡片：米白渐变底 + **渐变描边** + 外圈一层柔光渐变环。
+
+    外圈是三道逐渐变淡的金色圆角描边叠出来的"渐变外框"。
+    不用 `QGraphicsDropShadowEffect` 做投影：它在中文渲染上会发虚（v1.9.0 已弃用），
+    而这层柔光是自绘的，尺寸、透明度都能精确控制，缩放与高 DPI 下也稳定。
+    """
+
+    RADIUS = 12.0
+    RING = 6.0          # 外圈渐变环占用的宽度（卡片本体向内缩这么多）
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.RING + 0.5, self.RING + 0.5,
+                   self.width() - 2 * self.RING - 1.0,
+                   self.height() - 2 * self.RING - 1.0)
+
+        # 1. 外圈渐变环：三层由内向外变淡，形成柔和的金色外框。
+        #    渐变方向取「上→下」而不是对角：光从上方来的观感更自然，
+        #    下缘弱下去也不会在深色背景上显得脏。
+        for grow, width, alpha in ((4.5, 6.5, 18), (2.6, 4.5, 30), (0.8, 3.0, 50)):
+            ring = r.adjusted(-grow, -grow, grow, grow)
+            grad = QLinearGradient(ring.topLeft(), ring.bottomLeft())
+            grad.setColorAt(0.0, QColor(242, 206, 132, alpha))
+            grad.setColorAt(0.55, QColor(214, 170, 106, max(8, int(alpha * 0.75))))
+            grad.setColorAt(1.0, QColor(226, 186, 112, max(6, alpha // 3)))
+            path = QPainterPath()
+            path.addRoundedRect(ring, self.RADIUS + grow, self.RADIUS + grow)
+            p.setPen(QPen(QBrush(grad), width))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+
+        # 2. 卡片本体：米白渐变（与设置面板同族）
+        body = QPainterPath()
+        body.addRoundedRect(r, self.RADIUS, self.RADIUS)
+        bg = QLinearGradient(r.topLeft(), r.bottomLeft())
+        bg.setColorAt(0.0, QColor('#FFFDF9'))
+        bg.setColorAt(1.0, QColor('#F6EFE0'))
+        p.fillPath(body, QBrush(bg))
+
+        # 2b. 明确的渐变外框线：离卡片 3px 的一圈淡金细环。
+        #     光晕给"氛围"，这条线给"边界"——只有柔光时，深色背景上边界会糊。
+        ring_rect = r.adjusted(-3.0, -3.0, 3.0, 3.0)
+        ring_grad = QLinearGradient(ring_rect.topLeft(), ring_rect.bottomRight())
+        ring_grad.setColorAt(0.0, QColor(234, 198, 128, 130))
+        ring_grad.setColorAt(0.5, QColor(206, 168, 112, 72))
+        ring_grad.setColorAt(1.0, QColor(238, 202, 134, 118))
+        ring_path = QPainterPath()
+        ring_path.addRoundedRect(ring_rect, self.RADIUS + 3.0, self.RADIUS + 3.0)
+        p.setPen(QPen(QBrush(ring_grad), 1.2))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(ring_path)
+
+        # 3. 渐变描边：左上暖金 → 右下浅棕再回金，像被光斜着扫过
+        edge = QLinearGradient(r.topLeft(), r.bottomRight())
+        edge.setColorAt(0.0, QColor('#F3D89C'))
+        edge.setColorAt(0.35, QColor('#E1C89D'))
+        edge.setColorAt(0.70, QColor('#CCB388'))
+        edge.setColorAt(1.0, QColor('#F0CA80'))
+        p.setPen(QPen(QBrush(edge), 1.5))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(body)
+        p.end()
+
+
+class AutoCloseNotice(QDialog):
+    """
+    到点自己关的轻提示：**无按钮、非模态**。
+
+    不用 `QMessageBox`：即便构造时传 `NoButton`，Qt 在 `exec_()` 阶段仍会
+    补一个 OK 按钮（实测关闭结果框上照样冒出 OK），用户还是得点一下；
+    而且模态框会挡住主界面，可"关闭全部成功"这种信息只需要被看到，不需要被确认。
+
+    所以这里自己画一张与设置面板同族的米白卡片（`NoticeCard`），
+    右上角没有关闭按钮、下方没有 OK，倒计时走到 0 就消失。
+    点一下也能立刻关掉——保留"想马上关就能关"的出口，但不点也能走完。
+
+    卡片四周留一圈**透明空隙**（`GAP`）+ 一圈渐变柔光外框：
+    卡片顶到窗口边缘时，圆角与描边会被窗口边界切掉一截，观感很硬（v1.16.0 首版）。
+    """
+
+    MAX_WIDTH = 460
+    GAP = 16            # 卡片到窗口边缘的透明空隙，也是柔光外框的呼吸空间
+
+    def __init__(self, parent, msg, seconds=5):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.Tool
+                         | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+
+        self._msg = msg
+        self._left = max(1, int(seconds))
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+        self._card = NoticeCard(self)
+        self._label = QLabel(self._text(), self._card)
+        self._label.setFont(ui_font(13))
+        self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._label.setContentsMargins(18, 14, 18, 14)
+        self._label.setMaximumWidth(self.MAX_WIDTH)
+
+        card_lay = QVBoxLayout(self._card)
+        pad = int(NoticeCard.RING) + 4
+        card_lay.setContentsMargins(pad, pad, pad, pad)
+        card_lay.addWidget(self._label)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(self.GAP, self.GAP, self.GAP, self.GAP)
+        outer.addWidget(self._card)
+
+    def _text(self):
+        return self._msg + '\n\n' + t('close.auto_close_hint', sec=self._left)
+
+    def popup(self):
+        """居中于父窗口显示，并开始倒计时。"""
+        self.adjustSize()
+        if self.parent() is not None:
+            ref = self.parent().frameGeometry()
+        else:
+            ref = QApplication.primaryScreen().availableGeometry()
+        self.move(ref.center() - self.rect().center())
+        self.show()
+        self._timer.start(1000)
+        return self
+
+    def _tick(self):
+        self._left -= 1
+        if self._left <= 0:
+            self._timer.stop()
+            self.close()
+            return
+        # 只换文字，不重新 adjustSize：秒数宽度一致，窗口不会随倒计时抖动
+        self._label.setText(self._text())
+
+    def mousePressEvent(self, event):
+        self.close()
+        super().mousePressEvent(event)
+
+
 class SizeSlider(QWidget):
     """
     字号滑块（自绘）。
@@ -4334,7 +4477,33 @@ class LauncherWindow(QMainWindow):
 
         log.info('关闭结束：程序成功 %d / 失败 %d；文件夹窗口成功 %d / 失败 %d；跳过 %d',
                  closed, len(failed), win_closed, len(win_failed), skip_total)
-        QMessageBox.information(self, t('close.result_title'), msg)
+        self._show_close_result(msg, has_failure=bool(all_failed))
+
+    # 关闭全部「没有失败」时结果提示的停留时长（秒）
+    CLOSE_NOTICE_SECONDS = 5
+
+    def _make_close_notice(self, msg, seconds=CLOSE_NOTICE_SECONDS):
+        """造一个「不用点按钮、到点自己关」的结果提示（不启动倒计时）。
+
+        拆出这一步是为了让测试能拿到提示对象、把秒数改短，不必真等 5 秒
+        （见 test_step20）。
+        """
+        return AutoCloseNotice(self, msg, seconds)
+
+    def _show_close_result(self, msg, has_failure):
+        """关闭结果的收尾提示。
+
+        全部关掉时只是告知一声：轻提示 + 倒计时，5 秒后自己消失，不挡主界面；
+        **有失败项时才用 `QMessageBox`**——失败需要人来处理（看日志、手动结束），
+        自动消失会让这份信息被错过。
+        """
+        if has_failure:
+            QMessageBox.information(self, t('close.result_title'), msg)
+            return
+        notice = self._make_close_notice(msg)
+        self._close_notice = notice                  # 非模态，得自己拽住引用
+        notice.finished.connect(lambda _r=0: setattr(self, '_close_notice', None))
+        notice.popup()
 
     @staticmethod
     def _pid_in_map(pid, proc_map):

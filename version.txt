@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 15, 0, 0),
-    prodvers=(1, 15, 0, 0),
+    filevers=(1, 16, 0, 0),
+    prodvers=(1, 16, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'sunshine的故事'),
             StringStruct('FileDescription', '一键多启 - 多预设启动器'),
-            StringStruct('FileVersion', '1.15.0'),
+            StringStruct('FileVersion', '1.16.0'),
             StringStruct('InternalName', 'MultiLauncher'),
             StringStruct('LegalCopyright', 'Copyright © 2026 sunshine的故事.  All rights reserved.'),
             StringStruct('OriginalFilename', '一键多启.exe'),
             StringStruct('ProductName', '一键多启'),
-            StringStruct('ProductVersion', '1.15.0')
+            StringStruct('ProductVersion', '1.16.0')
           ])
       ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

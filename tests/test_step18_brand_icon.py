@@ -82,26 +82,24 @@ try:
     assert pw == ph, '母版应为正方形'
     assert 512 <= pw <= 1024, '母版边长应在 512–1024 之间（太小放大后发虚）'
 
-    # 水印在源图右下角（y ≥ 930/1024）。母版是按主体包围盒重新裁剪的，
-    # 这里断言"裁剪留下了干净的外圈"——主体不顶边，且四边是统一浅色背景。
-    # （水印是否被裁掉由生成时的裁剪框保证：下沿 898 < 930，见 REQ-015）
+    # v1.15.0 时母版是不透明米白底，这里断言"裁剪留下了浅色边"；
+    # v1.16.0 起外圈改为透明（REQ-016），外圈断言改成「全透明」——
+    # 转成 RGB 看，透明像素会变黑，所以要按 alpha 判断。
     try:
         from PIL import Image
     except ImportError:
         print('    未安装 Pillow，跳过像素断言')
     else:
-        im = Image.open(PNG).convert('RGB')
+        im = Image.open(PNG).convert('RGBA')
         ring = 3
-        edges = []
-        for x in range(pw):
-            for y in list(range(ring)) + list(range(ph - ring, ph)):
-                edges.append(im.getpixel((x, y)))
-        for y in range(ph):
-            for x in list(range(ring)) + list(range(pw - ring, pw)):
-                edges.append(im.getpixel((x, y)))
-        darkest = min(sum(c) for c in edges)
-        print('    外圈 %dpx：最深像素色和=%d（越小越黑）' % (ring, darkest))
-        assert darkest > 400, '外圈出现深色主体（色和 %d），说明裁剪没留边' % darkest
+        coords = [(x, y) for x in range(pw)
+                  for y in list(range(ring)) + list(range(ph - ring, ph))]
+        coords += [(x, y) for y in range(ph)
+                   for x in list(range(ring)) + list(range(pw - ring, pw))]
+        alphas = [im.getpixel(c)[3] for c in coords]
+        opaque = sum(1 for a in alphas if a > 8)
+        print('    外圈 %dpx：%d/%d 个像素不透明' % (ring, opaque, len(alphas)))
+        assert opaque == 0, '外圈还有 %d 个不透明像素，背景没有去掉干净' % opaque
 
     # ---------- 3. 主窗口运行时图标 ----------
     from PyQt5.QtWidgets import QApplication

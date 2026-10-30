@@ -4,9 +4,9 @@
 
 | 项目 | 位置 |
 |---|---|
-| 当前版本 | **v1.15.0** |
+| 当前版本 | **v1.16.0** |
 | 源码主副本 | `../src/launchforge.py`（界面）；`../src/lf_i18n.py`（四语文案表） |
-| 可执行产物 | `../LaunchForge_v1.15.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
+| 可执行产物 | `../LaunchForge_v1.16.0.exe`（仓库根只留这一个；原始程序存档在分析工作区 `LaunchForge_Reverse\original\`） |
 | 逆向还原说明 | `07-逆向与构建/还原报告.md` |
 | 分析 / 验证工作区 | `E:\electronic2\software\workbuddy\data\Start_all_app\LaunchForge_Reverse`（解包产物、反汇编清单、验收脚本） |
 | 仓库结构 | 见根目录 `../README.md` 的「目录结构」一节 |
@@ -63,6 +63,8 @@
 | REQ-013 | 圆盘放大与盘面文字修正 | 已完成（v1.13.0） |
 | REQ-014 | 界面多语言（中 / 英 / 日 / 繁） | 已完成（v1.14.0） |
 | REQ-015 | 品牌图标（最终 logo） | 已完成（v1.15.0） |
+| REQ-016 | Logo 圆角与透明背景 | 已完成（v1.16.0） |
+| REQ-017 | 关闭结果提示自动消失 | 已完成（v1.16.0） |
 | BUG-006 | 点击「设置」后残留虚线焦点环 | 已修复（v1.14.1） |
 | BUG-007 | 批处理伴生进程误杀无关程序 | 已修复（v1.14.2） |
 
@@ -85,6 +87,8 @@
 | FEAT-013 | 圆盘放大与盘面文字 |
 | FEAT-014 | 界面多语言（中 / 英 / 日 / 繁） |
 | FEAT-015 | 品牌图标（七档 ICO + 母版 PNG） |
+| FEAT-016 | Logo 圆角与透明背景（`scripts/make_logo.py`） |
+| FEAT-017 | 关闭结果提示自动消失（`AutoCloseNotice`） |
 
 ## 问题与缺陷
 

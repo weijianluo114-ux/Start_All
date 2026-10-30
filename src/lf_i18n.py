@@ -563,6 +563,10 @@ STRINGS = {
     'close.result_title': {
         'zh-Hans': '关闭结果', 'en': 'Close results', 'ja': '終了結果', 'zh-Hant': '關閉結果',
     },
+    'close.auto_close_hint': {
+        'zh-Hans': '{sec} 秒后自动关闭', 'en': 'Closing in {sec} s',
+        'ja': '{sec} 秒後に自動的に閉じます', 'zh-Hant': '{sec} 秒後自動關閉',
+    },
     'close.result_programs': {
         'zh-Hans': '已关闭 {count} 个程序。', 'en': 'Closed {count} program(s).',
         'ja': 'プログラム {count} 件を終了しました。', 'zh-Hant': '已關閉 {count} 個程式。',

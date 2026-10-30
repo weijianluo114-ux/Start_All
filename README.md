@@ -107,7 +107,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.15.0 ^
+    --name LaunchForge_v1.16.0 ^
     src\launchforge.py
 ```
 
@@ -308,7 +308,7 @@ python -m PyInstaller --noconfirm --onefile --windowed ^
     --icon=assets\logo.ico ^
     --add-data "assets\logo.ico;." ^
     --version-file=version.txt ^
-    --name LaunchForge_v1.15.0 ^
+    --name LaunchForge_v1.16.0 ^
     src\launchforge.py
 ```
 
